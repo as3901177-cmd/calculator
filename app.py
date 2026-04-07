@@ -502,11 +502,11 @@ def visualize_dxf_with_numbers(doc, objects_data, show_markers=True, font_size_m
 
 st.set_page_config(
     page_title="Анализатор Чертежей CAD Pro",
-    page_icon="✂️",
+    page_icon="📐",
     layout="wide"
 )
 
-st.title("✂️ Анализатор Чертежей CAD Pro")
+st.title("📐 Анализатор Чертежей CAD Pro")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**  
 Загрузите DXF-чертеж и получите точный анализ с визуализацией и детальной спецификацией.
