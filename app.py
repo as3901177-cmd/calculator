@@ -410,8 +410,16 @@ def draw_entity_manually(ax, entity):
     except:
         pass
 
-def visualize_dxf_with_numbers(doc, objects_data):
-    """Создает визуализацию с номерами РЯДОМ с линиями."""
+def visualize_dxf_with_numbers(doc, objects_data, show_markers=True, font_size_multiplier=1.0):
+    """
+    Создает визуализацию с номерами РЯДОМ с линиями.
+    
+    Args:
+        doc: DXF документ
+        objects_data: Данные об объектах
+        show_markers: Показывать ли маркеры (True/False)
+        font_size_multiplier: Множитель размера шрифта (0.5 - 3.0)
+    """
     try:
         # Создаём фигуру с серым фоном
         fig, ax = plt.subplots(figsize=(18, 14), dpi=100)
@@ -425,56 +433,58 @@ def visualize_dxf_with_numbers(doc, objects_data):
         for entity in msp:
             draw_entity_manually(ax, entity)
         
-        # Вычисляем размеры для маркеров и смещения
-        all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
-        all_y = [obj['center'][1] for obj in objects_data if obj['center'][1] != 0]
-        
-        if all_x and all_y:
-            drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-            font_size = max(int(drawing_size * 0.003), 7)
-            # ✅ Смещение от линии - 1.5% от размера чертежа
-            offset_distance = drawing_size * 0.015
-        else:
-            font_size = 8
-            offset_distance = 10
-        
-        # Добавляем номера со смещением от линий
-        for obj in objects_data:
-            num = obj['num']
+        # ✅ ЕСЛИ МАРКЕРЫ ВКЛЮЧЕНЫ - рисуем их
+        if show_markers:
+            # Вычисляем размеры для маркеров и смещения
+            all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
+            all_y = [obj['center'][1] for obj in objects_data if obj['center'][1] != 0]
             
-            # ✅ Получаем позицию СО СМЕЩЕНИЕМ от линии
-            entity = None
-            for ent in msp:
-                if ent.dxftype() in calculators:
-                    # Простая проверка - можно улучшить
-                    center_check = get_entity_center_with_offset(ent, 0)
-                    if abs(center_check[0] - obj['center'][0]) < 0.01 and abs(center_check[1] - obj['center'][1]) < 0.01:
-                        entity = ent
-                        break
-            
-            if entity:
-                x, y = get_entity_center_with_offset(entity, offset_distance)
+            if all_x and all_y:
+                drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
+                # ✅ Применяем множитель размера шрифта
+                base_font_size = max(int(drawing_size * 0.003), 7)
+                font_size = int(base_font_size * font_size_multiplier)
+                offset_distance = drawing_size * 0.015
             else:
-                x, y = obj['center']
+                font_size = int(8 * font_size_multiplier)
+                offset_distance = 10
             
-            if x == 0 and y == 0:
-                continue
-            
-            # ✅ Компактный маркер с номером
-            ax.annotate(str(num), (x, y), 
-                       fontsize=font_size, 
-                       fontweight='bold',
-                       ha='center', 
-                       va='center',
-                       color='white', 
-                       zorder=101,
-                       bbox=dict(
-                           boxstyle='circle,pad=0.35',
-                           facecolor='#FF0000',
-                           edgecolor='white',
-                           linewidth=1.5,
-                           alpha=0.95
-                       ))
+            # Добавляем номера со смещением от линий
+            for obj in objects_data:
+                num = obj['num']
+                
+                # Получаем позицию СО СМЕЩЕНИЕМ от линии
+                entity = None
+                for ent in msp:
+                    if ent.dxftype() in calculators:
+                        center_check = get_entity_center_with_offset(ent, 0)
+                        if abs(center_check[0] - obj['center'][0]) < 0.01 and abs(center_check[1] - obj['center'][1]) < 0.01:
+                            entity = ent
+                            break
+                
+                if entity:
+                    x, y = get_entity_center_with_offset(entity, offset_distance)
+                else:
+                    x, y = obj['center']
+                
+                if x == 0 and y == 0:
+                    continue
+                
+                # Компактный маркер с номером
+                ax.annotate(str(num), (x, y), 
+                           fontsize=font_size, 
+                           fontweight='bold',
+                           ha='center', 
+                           va='center',
+                           color='white', 
+                           zorder=101,
+                           bbox=dict(
+                               boxstyle='circle,pad=0.35',
+                               facecolor='#FF0000',
+                               edgecolor='white',
+                               linewidth=1.5,
+                               alpha=0.95
+                           ))
         
         ax.set_aspect('equal')
         ax.autoscale()
@@ -566,7 +576,6 @@ if uploaded_file is not None:
                     
                     if length > 0.0001:
                         num += 1
-                        # Сохраняем центр БЕЗ смещения для сопоставления
                         center_x, center_y = 0, 0
                         
                         if entity_type == 'LINE':
@@ -692,10 +701,35 @@ if uploaded_file is not None:
                 
                 with col_right:
                     st.markdown("### 🎨 Чертеж с маркировкой")
-                    st.caption("⬛ Черные линии | 🔴 Номера рядом с линиями | Серый фон")
+                    
+                    # ✅ ЭЛЕМЕНТЫ УПРАВЛЕНИЯ ВИЗУАЛИЗАЦИЕЙ
+                    control_col1, control_col2 = st.columns(2)
+                    
+                    with control_col1:
+                        show_markers = st.checkbox(
+                            "🔴 Показать маркеры",
+                            value=True,
+                            help="Включить/выключить отображение номеров на чертеже"
+                        )
+                    
+                    with control_col2:
+                        font_size_multiplier = st.slider(
+                            "📏 Размер шрифта маркеров",
+                            min_value=0.5,
+                            max_value=3.0,
+                            value=1.0,
+                            step=0.1,
+                            help="Изменить размер цифр на маркерах",
+                            disabled=not show_markers
+                        )
+                    
+                    if show_markers:
+                        st.caption("⬛ Черные линии | 🔴 Красные номера | Серый фон")
+                    else:
+                        st.caption("⬛ Только чертеж без маркировки")
                     
                     with st.spinner('Генерация визуализации...'):
-                        fig = visualize_dxf_with_numbers(doc, objects_data)
+                        fig = visualize_dxf_with_numbers(doc, objects_data, show_markers, font_size_multiplier)
                         
                         if fig:
                             st.pyplot(fig, use_container_width=True)
@@ -756,14 +790,18 @@ else:
        - ✅ Общая длина реза в мм/см/м
        - ✅ Статистика по типам объектов
        - ✅ Группировка одинаковых деталей
-       - ✅ Визуализация с номерами РЯДОМ с линиями
-    3. **Экспортируйте результаты** в CSV
+       - ✅ Визуализация с настраиваемыми маркерами
+    3. **Настройте отображение:**
+       - 🔴 Включите/выключите маркеры
+       - 📏 Измените размер шрифта (×0.5 - ×3.0)
+    4. **Экспортируйте результаты** в CSV
     
     ### 💡 Особенности:
     
     - ⚙️ Поддержка основных типов CAD-объектов
     - 📐 Точный расчет дуг в полилиниях (bulge)
-    - 🎯 Номера размещены РЯДОМ с линиями (перпендикулярное смещение)
+    - 🎯 Номера размещены рядом с линиями
+    - 🎨 Настраиваемая визуализация
     - 📊 Экспорт в CSV
     - ⚡ Быстрая обработка
     """)
@@ -771,6 +809,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v12.5 | Номера рядом с линиями | Поддержка DXF
+    ✂️ CAD Analyzer Pro v12.6 | Настраиваемые маркеры | Поддержка DXF
 </div>
 """, unsafe_allow_html=True)
