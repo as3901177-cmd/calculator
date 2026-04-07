@@ -182,24 +182,74 @@ def calc_text_length(entity):
     """TEXT: текст."""
     return 0.0
 
-# ==================== ЦЕНТР ОБЪЕКТА ====================
+# ==================== ЦЕНТР ОБЪЕКТА С ПЕРПЕНДИКУЛЯРНЫМ СМЕЩЕНИЕМ ====================
 
-def get_entity_center(entity):
-    """Возвращает центр объекта для размещения номера."""
+def get_entity_center_with_offset(entity, offset_distance):
+    """
+    Возвращает центр объекта СО СМЕЩЕНИЕМ от линии.
+    offset_distance - расстояние смещения от центра линии.
+    """
     entity_type = entity.dxftype()
     
     try:
         if entity_type == 'LINE':
             s, e = entity.dxf.start, entity.dxf.end
-            return ((s.x + e.x) / 2, (s.y + e.y) / 2)
+            # Центр линии
+            center_x = (s.x + e.x) / 2
+            center_y = (s.y + e.y) / 2
+            
+            # Вектор линии
+            dx = e.x - s.x
+            dy = e.y - s.y
+            line_length = math.hypot(dx, dy)
+            
+            if line_length > 0:
+                # Перпендикулярный вектор (повернутый на 90°)
+                perp_x = -dy / line_length
+                perp_y = dx / line_length
+                
+                # Смещаем центр перпендикулярно линии
+                offset_x = center_x + perp_x * offset_distance
+                offset_y = center_y + perp_y * offset_distance
+                
+                return (offset_x, offset_y)
+            
+            return (center_x, center_y)
         
-        elif entity_type in ('CIRCLE', 'ARC', 'ELLIPSE'):
+        elif entity_type == 'CIRCLE':
+            # Для окружности - смещаем вправо
             center = entity.dxf.center
-            return (center.x, center.y)
+            radius = entity.dxf.radius
+            return (center.x + radius + offset_distance, center.y)
+        
+        elif entity_type == 'ARC':
+            # Для дуги - смещаем от центра дуги наружу
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            start_angle = math.radians(entity.dxf.start_angle)
+            end_angle = math.radians(entity.dxf.end_angle)
+            
+            # Средний угол дуги
+            mid_angle = (start_angle + end_angle) / 2
+            if end_angle < start_angle:
+                mid_angle += math.pi
+            
+            # Точка на дуге + смещение наружу
+            arc_x = center.x + (radius + offset_distance) * math.cos(mid_angle)
+            arc_y = center.y + (radius + offset_distance) * math.sin(mid_angle)
+            
+            return (arc_x, arc_y)
+        
+        elif entity_type == 'ELLIPSE':
+            # Для эллипса - смещаем вправо
+            center = entity.dxf.center
+            major_axis = entity.dxf.major_axis
+            a = math.sqrt(major_axis.x**2 + major_axis.y**2)
+            return (center.x + a + offset_distance, center.y)
         
         elif entity_type == 'POINT':
             loc = entity.dxf.location
-            return (loc.x, loc.y)
+            return (loc.x + offset_distance, loc.y + offset_distance)
         
         elif entity_type in ('LWPOLYLINE', 'POLYLINE'):
             if entity_type == 'LWPOLYLINE':
@@ -208,21 +258,57 @@ def get_entity_center(entity):
             else:
                 points = [(p[0], p[1]) for p in entity.points()]
             
-            if points:
+            if points and len(points) >= 2:
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
-                return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+                center_x = (min(xs) + max(xs)) / 2
+                center_y = (min(ys) + max(ys)) / 2
+                
+                # Для полилинии берем первый сегмент для определения направления
+                dx = points[1][0] - points[0][0]
+                dy = points[1][1] - points[0][1]
+                seg_length = math.hypot(dx, dy)
+                
+                if seg_length > 0:
+                    perp_x = -dy / seg_length
+                    perp_y = dx / seg_length
+                    
+                    offset_x = center_x + perp_x * offset_distance
+                    offset_y = center_y + perp_y * offset_distance
+                    
+                    return (offset_x, offset_y)
+                
+                return (center_x, center_y)
         
         elif entity_type == 'SPLINE':
             points = list(entity.flattening(0.1))
-            if points:
+            if points and len(points) >= 2:
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
-                return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+                center_x = (min(xs) + max(xs)) / 2
+                center_y = (min(ys) + max(ys)) / 2
+                
+                # Берем середину сплайна для определения направления
+                mid_idx = len(points) // 2
+                if mid_idx + 1 < len(points):
+                    dx = points[mid_idx + 1][0] - points[mid_idx][0]
+                    dy = points[mid_idx + 1][1] - points[mid_idx][1]
+                    seg_length = math.hypot(dx, dy)
+                    
+                    if seg_length > 0:
+                        perp_x = -dy / seg_length
+                        perp_y = dx / seg_length
+                        
+                        offset_x = center_x + perp_x * offset_distance
+                        offset_y = center_y + perp_y * offset_distance
+                        
+                        return (offset_x, offset_y)
+                
+                return (center_x, center_y)
         
         elif entity_type == 'INSERT':
             pos = entity.dxf.insert
-            return (pos.x, pos.y)
+            return (pos.x + offset_distance, pos.y + offset_distance)
         
     except:
         pass
@@ -325,7 +411,7 @@ def draw_entity_manually(ax, entity):
         pass
 
 def visualize_dxf_with_numbers(doc, objects_data):
-    """Создает визуализацию с компактными маркерами."""
+    """Создает визуализацию с номерами РЯДОМ с линиями."""
     try:
         # Создаём фигуру с серым фоном
         fig, ax = plt.subplots(figsize=(18, 14), dpi=100)
@@ -339,26 +425,42 @@ def visualize_dxf_with_numbers(doc, objects_data):
         for entity in msp:
             draw_entity_manually(ax, entity)
         
-        # Вычисляем размеры для маркеров
+        # Вычисляем размеры для маркеров и смещения
         all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
         all_y = [obj['center'][1] for obj in objects_data if obj['center'][1] != 0]
         
         if all_x and all_y:
             drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-            # ✅ УМЕНЬШЕННЫЙ размер шрифта
             font_size = max(int(drawing_size * 0.003), 7)
+            # ✅ Смещение от линии - 1.5% от размера чертежа
+            offset_distance = drawing_size * 0.015
         else:
             font_size = 8
+            offset_distance = 10
         
-        # Добавляем КОМПАКТНЫЕ номера
+        # Добавляем номера со смещением от линий
         for obj in objects_data:
             num = obj['num']
-            x, y = obj['center']
+            
+            # ✅ Получаем позицию СО СМЕЩЕНИЕМ от линии
+            entity = None
+            for ent in msp:
+                if ent.dxftype() in calculators:
+                    # Простая проверка - можно улучшить
+                    center_check = get_entity_center_with_offset(ent, 0)
+                    if abs(center_check[0] - obj['center'][0]) < 0.01 and abs(center_check[1] - obj['center'][1]) < 0.01:
+                        entity = ent
+                        break
+            
+            if entity:
+                x, y = get_entity_center_with_offset(entity, offset_distance)
+            else:
+                x, y = obj['center']
             
             if x == 0 and y == 0:
                 continue
             
-            # ✅ ИСПОЛЬЗУЕМ BBOX ВМЕСТО КРУЖКА - автоматический размер под текст
+            # ✅ Компактный маркер с номером
             ax.annotate(str(num), (x, y), 
                        fontsize=font_size, 
                        fontweight='bold',
@@ -367,9 +469,9 @@ def visualize_dxf_with_numbers(doc, objects_data):
                        color='white', 
                        zorder=101,
                        bbox=dict(
-                           boxstyle='circle,pad=0.35',  # ✅ Минимальный отступ вокруг текста
-                           facecolor='#FF0000',  # Красный фон
-                           edgecolor='white',     # Белая обводка
+                           boxstyle='circle,pad=0.35',
+                           facecolor='#FF0000',
+                           edgecolor='white',
                            linewidth=1.5,
                            alpha=0.95
                        ))
@@ -380,7 +482,7 @@ def visualize_dxf_with_numbers(doc, objects_data):
         ax.axis('off')
         plt.tight_layout(pad=0.3)
         
-        return fig  # Возвращаем фигуру напрямую
+        return fig
         
     except Exception as e:
         st.error(f"Ошибка визуализации: {e}")
@@ -464,13 +566,43 @@ if uploaded_file is not None:
                     
                     if length > 0.0001:
                         num += 1
-                        center = get_entity_center(entity)
+                        # Сохраняем центр БЕЗ смещения для сопоставления
+                        center_x, center_y = 0, 0
+                        
+                        if entity_type == 'LINE':
+                            s, e = entity.dxf.start, entity.dxf.end
+                            center_x = (s.x + e.x) / 2
+                            center_y = (s.y + e.y) / 2
+                        elif entity_type in ('CIRCLE', 'ARC', 'ELLIPSE'):
+                            center = entity.dxf.center
+                            center_x, center_y = center.x, center.y
+                        elif entity_type == 'POINT':
+                            loc = entity.dxf.location
+                            center_x, center_y = loc.x, loc.y
+                        elif entity_type in ('LWPOLYLINE', 'POLYLINE'):
+                            if entity_type == 'LWPOLYLINE':
+                                with entity.points('xy') as pts:
+                                    points = list(pts)
+                            else:
+                                points = [(p[0], p[1]) for p in entity.points()]
+                            if points:
+                                xs = [p[0] for p in points]
+                                ys = [p[1] for p in points]
+                                center_x = (min(xs) + max(xs)) / 2
+                                center_y = (min(ys) + max(ys)) / 2
+                        elif entity_type == 'SPLINE':
+                            points = list(entity.flattening(0.1))
+                            if points:
+                                xs = [p[0] for p in points]
+                                ys = [p[1] for p in points]
+                                center_x = (min(xs) + max(xs)) / 2
+                                center_y = (min(ys) + max(ys)) / 2
                         
                         objects_data.append({
                             'num': num,
                             'type': entity_type,
                             'length': length,
-                            'center': center
+                            'center': (center_x, center_y)
                         })
                         
                         if entity_type not in stats:
@@ -560,7 +692,7 @@ if uploaded_file is not None:
                 
                 with col_right:
                     st.markdown("### 🎨 Чертеж с маркировкой")
-                    st.caption("⬛ Черные линии | 🔴 Компактные номера | Серый фон")
+                    st.caption("⬛ Черные линии | 🔴 Номера рядом с линиями | Серый фон")
                     
                     with st.spinner('Генерация визуализации...'):
                         fig = visualize_dxf_with_numbers(doc, objects_data)
@@ -624,14 +756,14 @@ else:
        - ✅ Общая длина реза в мм/см/м
        - ✅ Статистика по типам объектов
        - ✅ Группировка одинаковых деталей
-       - ✅ Визуализация с компактной нумерацией
+       - ✅ Визуализация с номерами РЯДОМ с линиями
     3. **Экспортируйте результаты** в CSV
     
     ### 💡 Особенности:
     
     - ⚙️ Поддержка основных типов CAD-объектов
     - 📐 Точный расчет дуг в полилиниях (bulge)
-    - 🎨 Компактные маркеры точно по размеру номера
+    - 🎯 Номера размещены РЯДОМ с линиями (перпендикулярное смещение)
     - 📊 Экспорт в CSV
     - ⚡ Быстрая обработка
     """)
@@ -639,6 +771,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v12.4 | Компактные маркеры | Поддержка DXF
+    ✂️ CAD Analyzer Pro v12.5 | Номера рядом с линиями | Поддержка DXF
 </div>
 """, unsafe_allow_html=True)
