@@ -1,0 +1,5 @@
+streamlit==1.31.0
+ezdxf==0.16.0
+matplotlib==3.8.3
+pandas==2.1.4
+pillow==10.2.0
