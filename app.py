@@ -9,6 +9,7 @@ import matplotlib.patches as mpatches
 import matplotlib
 matplotlib.use('Agg')  # Устанавливаем backend ДО импорта pyplot
 from PIL import Image, ImageDraw
+import numpy as np
 
 # Импорт Streamlit
 import streamlit as st
@@ -19,6 +20,7 @@ try:
     from ezdxf.addons.drawing import RenderContext, Frontend
     from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
     from ezdxf.addons.drawing.properties import Properties, LayoutProperties
+    from ezdxf.math import Vector
 except ImportError:
     st.error("❌ Библиотека ezdxf не найдена. Убедитесь, что все зависимости установлены.")
     st.stop()
@@ -380,16 +382,13 @@ class BlackLineBackend(MatplotlibBackend):
     
     def __init__(self, ax, adjust_figure=True):
         super().__init__(ax, adjust_figure=adjust_figure)
-        # Переопределяем цвета
-        self.default_color = '#000000'  # Черный для всех объектов
-        self.default_linewidth = 1.5
     
     def draw_line(self, start, end, properties):
         """Рисуем линию черным цветом."""
         self.ax.plot(
             [start[0], end[0]], 
             [start[1], end[1]], 
-            color='#000000',  # Черный цвет
+            color='#000000',
             linewidth=1.5,
             solid_capstyle='round',
             zorder=1
@@ -397,50 +396,66 @@ class BlackLineBackend(MatplotlibBackend):
     
     def draw_path(self, path, properties):
         """Рисуем путь черным цветом."""
-        vertices = []
-        codes = []
-        
-        for cmd in path:
-            if cmd[0] == 'move_to':
-                vertices.append(cmd[1])
-                codes.append(1)  # MOVETO
-            elif cmd[0] == 'line_to':
-                vertices.append(cmd[1])
-                codes.append(2)  # LINETO
-            elif cmd[0] == 'curve3_to':
-                vertices.append(cmd[1])
-                vertices.append(cmd[2])
-                codes.append(3)  # CURVE3
-                codes.append(3)
-            elif cmd[0] == 'curve4_to':
-                vertices.append(cmd[1])
-                vertices.append(cmd[2])
-                vertices.append(cmd[3])
-                codes.append(4)  # CURVE4
-                codes.append(4)
-                codes.append(4)
-        
-        if vertices:
-            from matplotlib.path import Path
-            path_obj = Path(vertices, codes)
-            patch = mpatches.PathPatch(
-                path_obj, 
-                facecolor='none', 
-                edgecolor='#000000',  # Черный цвет
+        try:
+            # Проверяем тип path
+            if hasattr(path, 'control_vertices'):
+                # Это NumpyPath2d
+                vertices = path.control_vertices()
+            elif hasattr(path, '__iter__'):
+                # Старый формат - итерируемый
+                vertices = list(path)
+            else:
+                return
+            
+            # Конвертируем в numpy array если нужно
+            if isinstance(vertices, np.ndarray):
+                vertices_array = vertices
+            else:
+                vertices_array = np.array(vertices)
+            
+            if len(vertices_array) < 2:
+                return
+            
+            # Рисуем как полилинию
+            self.ax.plot(
+                vertices_array[:, 0],
+                vertices_array[:, 1],
+                color='#000000',
                 linewidth=1.5,
+                solid_capstyle='round',
                 zorder=1
             )
-            self.ax.add_patch(patch)
+            
+        except Exception as e:
+            # Если не получилось - пропускаем
+            pass
     
     def draw_point(self, pos, properties):
         """Рисуем точку черным цветом."""
         self.ax.plot(
             pos[0], pos[1], 
             'o', 
-            color='#000000',  # Черный цвет
+            color='#000000',
             markersize=3,
             zorder=2
         )
+    
+    def draw_filled_polygon(self, points, properties):
+        """Рисуем заполненный полигон."""
+        try:
+            points_array = np.array(points)
+            polygon = mpatches.Polygon(
+                points_array,
+                closed=True,
+                facecolor='#CCCCCC',
+                edgecolor='#000000',
+                linewidth=1.5,
+                alpha=0.3,
+                zorder=1
+            )
+            self.ax.add_patch(polygon)
+        except:
+            pass
 
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
@@ -457,7 +472,11 @@ def visualize_dxf_with_numbers(doc, objects_data):
         # Рисуем DXF с КАСТОМНЫМ backend (черные линии)
         ctx = RenderContext(doc)
         backend = BlackLineBackend(ax, adjust_figure=False)
-        Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=False)
+        
+        try:
+            Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=False)
+        except Exception as draw_err:
+            st.warning(f"⚠️ Частичная ошибка отрисовки: {str(draw_err)}")
         
         # Вычисляем размер чертежа для масштабирования меток
         all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
@@ -495,7 +514,7 @@ def visualize_dxf_with_numbers(doc, objects_data):
         
         ax.set_aspect('equal')
         ax.autoscale()
-        ax.margins(0.05)  # Небольшие отступы
+        ax.margins(0.05)
         ax.axis('off')
         plt.tight_layout(pad=0.3)
         
@@ -732,7 +751,7 @@ if uploaded_file is not None:
                 
                 with col_right:
                     st.markdown("### 🎨 Чертеж с маркировкой")
-                    st.caption("🟥 Красные кружки с номерами | ⬛ Черные линии на сером фоне")
+                    st.caption("🔴 Красные кружки с номерами | ⬛ Черные линии на сером фоне")
                     
                     # Создаем визуализацию
                     with st.spinner('🎨 Генерация изображения с черными линиями...'):
@@ -741,7 +760,7 @@ if uploaded_file is not None:
                             
                             if img:
                                 st.image(img, use_container_width=True)
-                                st.success("✅ Все объекты отображены черным цветом на сером фоне")
+                                st.success("✅ Все объекты отображены черным цветом")
                             else:
                                 st.error("❌ Не удалось создать визуализацию")
                         except Exception as viz_err:
@@ -799,7 +818,6 @@ if uploaded_file is not None:
                 st.code(traceback.format_exc())
 
 else:
-    # Инструкция при отсутствии файла
     st.info("👈 Загрузите DXF-чертеж для начала анализа")
     
     st.markdown("""
@@ -835,6 +853,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v12.1 | Точные расчеты для производства | Черные линии на сером фоне
+    ✂️ CAD Analyzer Pro v12.2 | Точные расчеты для производства | Черные линии на сером фоне
 </div>
 """, unsafe_allow_html=True)
