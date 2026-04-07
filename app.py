@@ -5,6 +5,8 @@ import warnings
 import io
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Устанавливаем backend ДО импорта pyplot
 from PIL import Image
 
 # Импорт Streamlit
@@ -372,13 +374,10 @@ calculators = {
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
 def visualize_dxf_with_numbers(doc, objects_data):
-    """Создает matplotlib фигуру с визуализацией DXF и нумерацией объектов."""
+    """Создает изображение с визуализацией DXF и нумерацией объектов."""
     try:
-        # Используем Agg backend для работы без GUI
-        import matplotlib
-        matplotlib.use('Agg')
-        
-        fig, ax = plt.subplots(figsize=(16, 12))
+        # Создаем фигуру
+        fig, ax = plt.subplots(figsize=(18, 14), dpi=100)
         
         # Рисуем DXF
         ctx = RenderContext(doc)
@@ -391,9 +390,11 @@ def visualize_dxf_with_numbers(doc, objects_data):
         
         if all_x and all_y:
             drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-            marker_size = drawing_size * 0.015
+            marker_size = drawing_size * 0.012
+            font_size = max(6, min(10, int(drawing_size * 0.003)))
         else:
             marker_size = 5
+            font_size = 8
         
         # Добавляем номера объектов
         for obj in objects_data:
@@ -405,69 +406,82 @@ def visualize_dxf_with_numbers(doc, objects_data):
             
             # Кружок с номером
             circle = plt.Circle((x, y), marker_size, 
-                                color='red', alpha=0.8, zorder=10)
+                                color='#FF4444', alpha=0.85, zorder=10,
+                                edgecolor='white', linewidth=0.5)
             ax.add_patch(circle)
             
             # Номер
             ax.annotate(str(num), (x, y), 
-                       fontsize=8, fontweight='bold',
+                       fontsize=font_size, fontweight='bold',
                        ha='center', va='center',
                        color='white', zorder=11)
         
         ax.set_aspect('equal')
         ax.autoscale()
         ax.axis('off')
-        plt.tight_layout()
+        plt.tight_layout(pad=0.1)
         
-        # Возвращаем фигуру напрямую для Streamlit
-        return fig
+        # Конвертируем в изображение
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', 
+                   facecolor='white', edgecolor='none')
+        buf.seek(0)
+        
+        # Открываем как PIL Image
+        img = Image.open(buf)
+        
+        # Закрываем фигуру
+        plt.close(fig)
+        
+        return img
         
     except Exception as e:
-        st.error(f"Ошибка визуализации: {e}")
+        st.error(f"❌ Ошибка визуализации: {str(e)}")
         import traceback
         st.code(traceback.format_exc())
+        plt.close('all')  # Закрываем все фигуры
         return None
 
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
 st.set_page_config(
-    page_title="DXF Калькулятор Длины Реза v12.0",
-    page_icon="📐",
+    page_title="Анализатор Чертежей CAD Pro",
+    page_icon="✂️",
     layout="wide"
 )
 
 # Заголовок
-st.title("📐 DXF Калькулятор Длины Реза v12.0")
+st.title("✂️ Анализатор Чертежей CAD Pro")
 st.markdown("""
-**Полная версия с поддержкой всех типов объектов**  
-Загрузите DXF-файл и получите детальный анализ длины реза с визуализацией и нумерацией объектов.
+**Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**  
+Загрузите DXF-чертеж и получите точный анализ с визуализацией и детальной спецификацией.
 """)
 
 # Информация о поддерживаемых типах
-with st.expander("ℹ️ Поддерживаемые типы объектов"):
+with st.expander("ℹ️ Поддерживаемые типы геометрии"):
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("""
-        **Базовые:**
-        - LINE (линия)
+        **Базовые примитивы:**
+        - LINE (отрезок)
         - CIRCLE (окружность)
         - ARC (дуга)
         - ELLIPSE (эллипс)
         """)
     with col2:
         st.markdown("""
-        **Полилинии:**
-        - LWPOLYLINE
-        - POLYLINE
-        - SPLINE
-        - MLINE
+        **Сложные контуры:**
+        - LWPOLYLINE (легкая полилиния)
+        - POLYLINE (полилиния)
+        - SPLINE (сплайн)
+        - MLINE (мультилиния)
         """)
     with col3:
         st.markdown("""
-        **Сложные:**
+        **Специальные объекты:**
         - HATCH (штриховка)
-        - INSERT (блоки)
-        - TEXT/MTEXT
+        - INSERT (блоки/вставки)
+        - TEXT/MTEXT (текст)
         - 3DFACE, SOLID, TRACE
         """)
 
@@ -475,13 +489,13 @@ st.markdown("---")
 
 # Загрузка файла
 uploaded_file = st.file_uploader(
-    "📂 Выберите DXF файл",
+    "📂 Загрузите чертеж в формате DXF",
     type=["dxf"],
-    help="Загрузите файл в формате DXF для анализа"
+    help="Выберите файл DXF для автоматического расчета длины реза"
 )
 
 if uploaded_file is not None:
-    with st.spinner('⏳ Анализ файла...'):
+    with st.spinner('⏳ Обработка чертежа...'):
         try:
             # Сохраняем временно
             temp_path = f"temp_{uploaded_file.name}"
@@ -536,8 +550,8 @@ if uploaded_file is not None:
                         })
                         
                         total_length += length
-                except:
-                    pass
+                except Exception as err:
+                    st.warning(f"⚠️ Пропущен объект {entity_type}: {str(err)}")
             
             _current_doc = None
             os.remove(temp_path)
@@ -545,22 +559,24 @@ if uploaded_file is not None:
             # ==================== ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ====================
             
             if not objects_data:
-                st.warning("⚠️ В файле не найдено объектов для расчета.")
+                st.warning("⚠️ В чертеже не найдено объектов для расчета.")
                 if skipped_types:
-                    st.info(f"Пропущенные типы: {', '.join(sorted(skipped_types))}")
+                    st.info(f"Необрабатываемые типы: {', '.join(sorted(skipped_types))}")
             else:
                 # Основная информация
                 st.success(f"✅ Успешно обработано: **{len(objects_data)}** объектов")
                 
                 # Итоговая длина
                 st.markdown("### 📏 Итоговая длина реза:")
-                col1, col2, col3 = st.columns(3)
+                col1, col2, col3, col4 = st.columns(4)
                 with col1:
-                    st.metric("Миллиметры", f"{total_length:.2f} мм")
+                    st.metric("Миллиметры", f"{total_length:.2f}")
                 with col2:
-                    st.metric("Сантиметры", f"{total_length/10:.2f} см")
+                    st.metric("Сантиметры", f"{total_length/10:.2f}")
                 with col3:
-                    st.metric("Метры", f"{total_length/1000:.4f} м")
+                    st.metric("Метры", f"{total_length/1000:.4f}")
+                with col4:
+                    st.metric("Объектов", f"{len(objects_data)}")
                 
                 st.markdown("---")
                 
@@ -568,7 +584,7 @@ if uploaded_file is not None:
                 col_left, col_right = st.columns([1, 1.5])
                 
                 with col_left:
-                    st.markdown("### 📊 Сводная статистика")
+                    st.markdown("### 📊 Сводная спецификация")
                     
                     # Создаем сводную таблицу
                     summary_rows = []
@@ -577,9 +593,9 @@ if uploaded_file is not None:
                         length = stats[entity_type]['length']
                         avg = length / count if count > 0 else 0
                         summary_rows.append({
-                            'Тип': entity_type,
+                            'Тип геометрии': entity_type,
                             'Кол-во': count,
-                            'Общая длина (мм)': round(length, 2),
+                            'Длина (мм)': round(length, 2),
                             'Средняя (мм)': round(avg, 2)
                         })
                     
@@ -591,10 +607,10 @@ if uploaded_file is not None:
                     )
                     
                     if skipped_types:
-                        st.caption(f"⚠️ Пропущено типов: {', '.join(sorted(skipped_types))}")
+                        st.caption(f"⚠️ Пропущено: {', '.join(sorted(skipped_types))}")
                     
                     # Группировка одинаковых
-                    st.markdown("### 📐 Группировка одинаковых")
+                    st.markdown("### 🔄 Повторяющиеся элементы")
                     length_groups = {}
                     for obj in objects_data:
                         key = round(obj['length'], 1)
@@ -613,9 +629,9 @@ if uploaded_file is not None:
                         if count > 1:
                             group_rows.append({
                                 'Тип': group['type'],
-                                'Длина': f"{group['length']:.2f} мм",
+                                'Размер': f"{group['length']:.2f} мм",
                                 'Кол-во': count,
-                                'Всего': f"{group['length']*count:.2f} мм"
+                                'Итого': f"{group['length']*count:.2f} мм"
                             })
                     
                     if group_rows:
@@ -626,25 +642,30 @@ if uploaded_file is not None:
                             hide_index=True
                         )
                     else:
-                        st.info("Одинаковых фигур не найдено")
+                        st.info("Повторяющихся элементов не обнаружено")
                 
                 with col_right:
-                    st.markdown("### 🎨 Визуализация с нумерацией")
+                    st.markdown("### 🎨 Чертеж с маркировкой")
                     
                     # Создаем визуализацию
-                    with st.spinner('Создание визуализации...'):
-                        fig = visualize_dxf_with_numbers(doc, objects_data)
-                    
-                    if fig:
-                        # ✅ ИСПРАВЛЕНО: Используем st.pyplot() для отображения matplotlib фигуры
-                        st.pyplot(fig, use_container_width=True)
-                        plt.close(fig)  # Закрываем фигуру для освобождения памяти
-                    else:
-                        st.error("Ошибка построения визуализации")
+                    with st.spinner('Генерация изображения...'):
+                        try:
+                            img = visualize_dxf_with_numbers(doc, objects_data)
+                            
+                            if img:
+                                st.image(img, use_container_width=True, 
+                                        caption="Красные маркеры с номерами соответствуют объектам в таблице ниже")
+                            else:
+                                st.error("❌ Не удалось создать визуализацию")
+                        except Exception as viz_err:
+                            st.error(f"❌ Ошибка визуализации: {str(viz_err)}")
+                            import traceback
+                            with st.expander("Детали ошибки"):
+                                st.code(traceback.format_exc())
                 
                 # Детальный список объектов
                 st.markdown("---")
-                st.markdown("### 📋 Детальный список всех объектов")
+                st.markdown("### 📋 Полная спецификация деталей")
                 
                 # Создаем полный список
                 detail_rows = []
@@ -653,15 +674,15 @@ if uploaded_file is not None:
                         '№': obj['num'],
                         'Тип': obj['type'],
                         'Длина (мм)': round(obj['length'], 2),
-                        'Координаты X': round(obj['center'][0], 2),
-                        'Координаты Y': round(obj['center'][1], 2)
+                        'X': round(obj['center'][0], 2),
+                        'Y': round(obj['center'][1], 2)
                     })
                 
                 df_detail = pd.DataFrame(detail_rows)
                 
                 # Фильтр по типу
                 selected_types = st.multiselect(
-                    "Фильтр по типу объекта:",
+                    "🔍 Фильтр по типу геометрии:",
                     options=sorted(stats.keys()),
                     default=sorted(stats.keys())
                 )
@@ -678,47 +699,55 @@ if uploaded_file is not None:
                     # Скачать CSV
                     csv = df_filtered.to_csv(index=False, encoding='utf-8-sig')
                     st.download_button(
-                        label="📥 Скачать детальный отчет (CSV)",
+                        label="📥 Экспорт спецификации (CSV)",
                         data=csv,
-                        file_name=f"dxf_report_{uploaded_file.name}.csv",
+                        file_name=f"specification_{uploaded_file.name}.csv",
                         mime="text/csv"
                     )
                 
         except Exception as e:
-            st.error(f"❌ Произошла ошибка: {e}")
+            st.error(f"❌ Критическая ошибка при обработке: {str(e)}")
             import traceback
-            with st.expander("Показать детали ошибки"):
+            with st.expander("Показать технические детали"):
                 st.code(traceback.format_exc())
 
 else:
     # Инструкция при отсутствии файла
-    st.info("👈 Загрузите DXF файл для начала анализа")
+    st.info("👈 Загрузите DXF-чертеж для начала анализа")
     
     st.markdown("""
-    ### 🚀 Как использовать:
+    ### 🚀 Руководство пользователя:
     
-    1. **Загрузите файл** в формате DXF через форму выше
-    2. **Получите анализ** со следующими данными:
-       - Общая длина реза в мм/см/м
-       - Статистика по типам объектов
-       - Группировка одинаковых фигур
-       - Детальный список всех объектов
-       - Визуализация чертежа с нумерацией
-    3. **Скачайте отчет** в формате CSV
+    1. **Загрузите чертеж** в формате DXF (AutoCAD, LibreCAD, QCAD и др.)
+    2. **Получите детальный анализ:**
+       - ✅ Общая длина реза в разных единицах измерения
+       - ✅ Разбивка по типам геометрических объектов
+       - ✅ Группировка одинаковых деталей
+       - ✅ Интерактивная таблица с фильтрацией
+       - ✅ Визуализация чертежа с нумерацией элементов
+    3. **Экспортируйте результаты** в формате CSV для дальнейшей обработки
     
-    ### 💡 Особенности:
+    ### 💡 Ключевые возможности:
     
-    - ✅ Поддержка 18+ типов объектов DXF
-    - ✅ Учет дуг в полилиниях (bulge)
-    - ✅ Обработка блоков (INSERT) с масштабом
-    - ✅ Визуализация с нумерацией объектов
-    - ✅ Экспорт результатов в CSV
+    - ⚙️ Поддержка 18+ типов CAD-объектов
+    - 📐 Точный расчет дуговых сегментов (bulge в полилиниях)
+    - 🔲 Автоматическая обработка вложенных блоков с учетом масштаба
+    - 🎨 Наглядная визуализация с цветной маркировкой
+    - 📊 Экспорт детальной спецификации в CSV
+    - ⚡ Быстрая обработка больших чертежей
+    
+    ### 🎯 Применение:
+    - Лазерная резка металла
+    - ЧПУ фрезеровка
+    - Плазменная резка
+    - Гидроабразивная резка
+    - Расчет расхода материала
     """)
 
 # Футер
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    DXF Calculator v12.0 | Создано для точных расчетов длины реза
+    ✂️ CAD Analyzer Pro v12.0 | Точные расчеты для производства | Поддержка DXF/AutoCAD
 </div>
 """, unsafe_allow_html=True)
