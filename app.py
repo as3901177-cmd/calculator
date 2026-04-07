@@ -372,13 +372,20 @@ calculators = {
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
 def visualize_dxf_with_numbers(doc, objects_data):
+    """Создает matplotlib фигуру с визуализацией DXF и нумерацией объектов."""
     try:
+        # Используем Agg backend для работы без GUI
+        import matplotlib
+        matplotlib.use('Agg')
+        
         fig, ax = plt.subplots(figsize=(16, 12))
         
+        # Рисуем DXF
         ctx = RenderContext(doc)
         backend = MatplotlibBackend(ax)
         Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=True)
         
+        # Вычисляем размер чертежа для масштабирования меток
         all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
         all_y = [obj['center'][1] for obj in objects_data if obj['center'][1] != 0]
         
@@ -388,16 +395,20 @@ def visualize_dxf_with_numbers(doc, objects_data):
         else:
             marker_size = 5
         
+        # Добавляем номера объектов
         for obj in objects_data:
             num = obj['num']
             x, y = obj['center']
+            
             if x == 0 and y == 0:
                 continue
             
+            # Кружок с номером
             circle = plt.Circle((x, y), marker_size, 
                                 color='red', alpha=0.8, zorder=10)
             ax.add_patch(circle)
             
+            # Номер
             ax.annotate(str(num), (x, y), 
                        fontsize=8, fontweight='bold',
                        ha='center', va='center',
@@ -408,14 +419,13 @@ def visualize_dxf_with_numbers(doc, objects_data):
         ax.axis('off')
         plt.tight_layout()
         
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-        buf.seek(0)
-        img = Image.open(buf)
-        plt.close(fig)
-        return img
+        # Возвращаем фигуру напрямую для Streamlit
+        return fig
+        
     except Exception as e:
         st.error(f"Ошибка визуализации: {e}")
+        import traceback
+        st.code(traceback.format_exc())
         return None
 
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
@@ -621,10 +631,14 @@ if uploaded_file is not None:
                 with col_right:
                     st.markdown("### 🎨 Визуализация с нумерацией")
                     
-                    fig_img = visualize_dxf_with_numbers(doc, objects_data)
+                    # Создаем визуализацию
+                    with st.spinner('Создание визуализации...'):
+                        fig = visualize_dxf_with_numbers(doc, objects_data)
                     
-                    if fig_img:
-                        st.image(fig_img, use_container_width=True)
+                    if fig:
+                        # ✅ ИСПРАВЛЕНО: Используем st.pyplot() для отображения matplotlib фигуры
+                        st.pyplot(fig, use_container_width=True)
+                        plt.close(fig)  # Закрываем фигуру для освобождения памяти
                     else:
                         st.error("Ошибка построения визуализации")
                 
