@@ -7,32 +7,34 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from PIL import Image
 
-# Импорт библиотек для потока данных
+# Импорт Streamlit
 import streamlit as st
 
-# Импорты вашего логики
+# Импорты для работы с DXF
 try:
     import ezdxf
     from ezdxf.addons.drawing import RenderContext, Frontend
     from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
 except ImportError:
-    st.error("Библиотека ezdxf не найдена. Убедитесь, что все зависимости установлены.")
+    st.error("❌ Библиотека ezdxf не найдена. Убедитесь, что все зависимости установлены.")
     st.stop()
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-# --- НАЧАЛО ВАШЕГО КОДА (Расчеты и функции) ---
-# Я сохранил всю логику расчетов, но убрал лишние проверки для Web-версии
+# ==================== РАСЧЁТ ДЛИНЫ — БАЗОВЫЕ ====================
 
 def calc_line_length(entity):
+    """LINE: прямая линия."""
     start = entity.dxf.start
     end = entity.dxf.end
     return math.hypot(end.x - start.x, end.y - start.y)
 
 def calc_circle_length(entity):
+    """CIRCLE: окружность."""
     return 2 * math.pi * entity.dxf.radius
 
 def calc_arc_length(entity):
+    """ARC: дуга окружности."""
     radius = entity.dxf.radius
     start_angle = math.radians(entity.dxf.start_angle)
     end_angle = math.radians(entity.dxf.end_angle)
@@ -42,6 +44,7 @@ def calc_arc_length(entity):
     return radius * angle
 
 def calc_ellipse_length(entity):
+    """ELLIPSE: эллипс или его дуга."""
     try:
         major_axis = entity.dxf.major_axis
         ratio = entity.dxf.ratio
@@ -72,6 +75,7 @@ def calc_ellipse_length(entity):
         return 0.0
 
 def calc_lwpolyline_length(entity):
+    """LWPOLYLINE: лёгкая полилиния с bulge (дугами)."""
     try:
         points = []
         with entity.points('xyb') as pts:
@@ -112,6 +116,7 @@ def calc_lwpolyline_length(entity):
         return 0.0
 
 def calc_polyline_length(entity):
+    """POLYLINE: старая полилиния."""
     try:
         points = list(entity.points())
         if len(points) < 2:
@@ -130,6 +135,7 @@ def calc_polyline_length(entity):
         return 0.0
 
 def calc_spline_length(entity):
+    """SPLINE: B-сплайн."""
     try:
         points = list(entity.flattening(0.001))
         if len(points) < 2:
@@ -141,57 +147,151 @@ def calc_spline_length(entity):
     except:
         return 0.0
 
-# Остальные вспомогательные функции расчета
-def calc_point(e): 
+# ==================== РАСЧЁТ ДЛИНЫ — ДОПОЛНИТЕЛЬНЫЕ ====================
+
+def calc_point(entity):
     return 0.1
 
-def calc_mline_length(e): 
-    return 0.0
-
-def calc_helix_length(e): 
-    return 0.0
-
-def calc_3dface(e): 
-    return 0.0
-
-def calc_solid(e): 
-    return 0.0
-
-def calc_hatch_length(e): 
-    return 0.0
-
-def calc_region(e): 
-    return 0.0
-
-def calc_trace_length(e): 
-    return 0.0
-
-# Глобальная переменная для хранения текущего документа
-_current_doc = None
-
-def calc_insert_length(e):
-    global _current_doc  # ✅ ИСПРАВЛЕНО: объявление в начале функции
+def calc_mline_length(entity):
     try:
-        if _current_doc is None: 
+        vertices = entity.vertices
+        if len(vertices) < 2:
             return 0.0
-        bn = e.dxf.name
-        blk = _current_doc.blocks.get(bn)
-        if not blk: 
-            return 0.0
-        sc = abs(e.dxf.xscale)
-        tot = 0
-        for be in blk:
-            if be.dxftype() in calculators:
-                tot += calculators[be.dxftype()](be) * sc
-        return tot
-    except: 
+        length = 0.0
+        for i in range(len(vertices) - 1):
+            v1 = vertices[i]
+            v2 = vertices[i + 1]
+            length += math.hypot(v2.x - v1.x, v2.y - v1.y)
+        num_lines = len(entity.style.elements) if hasattr(entity, 'style') else 1
+        return length * max(num_lines, 1)
+    except:
         return 0.0
 
-def calc_text_length(e): 
+def calc_helix_length(entity):
     return 0.0
 
-def calc_mtext_length(e): 
+def calc_3dface(entity):
+    try:
+        p0 = entity.dxf.vtx0
+        p1 = entity.dxf.vtx1
+        p2 = entity.dxf.vtx2
+        p3 = entity.dxf.vtx3
+        d01 = math.hypot(p1.x - p0.x, p1.y - p0.y)
+        d12 = math.hypot(p2.x - p1.x, p2.y - p1.y)
+        d23 = math.hypot(p3.x - p2.x, p3.y - p2.y)
+        d30 = math.hypot(p0.x - p3.x, p0.y - p3.y)
+        if abs(p2.x - p3.x) < 0.001 and abs(p2.y - p3.y) < 0.001:
+            return d01 + d12 + d30
+        return d01 + d12 + d23 + d30
+    except:
+        return 0.0
+
+def calc_solid(entity):
+    try:
+        p0 = entity.dxf.vtx0
+        p1 = entity.dxf.vtx1
+        p2 = entity.dxf.vtx2
+        p3 = entity.dxf.vtx3
+        d01 = math.hypot(p1.x - p0.x, p1.y - p0.y)
+        d13 = math.hypot(p3.x - p1.x, p3.y - p1.y)
+        d32 = math.hypot(p2.x - p3.x, p2.y - p3.y)
+        d20 = math.hypot(p0.x - p2.x, p0.y - p2.y)
+        return d01 + d13 + d32 + d20
+    except:
+        return 0.0
+
+def calc_hatch_length(entity):
+    try:
+        total = 0.0
+        for path in entity.paths:
+            if hasattr(path, 'vertices'):
+                vertices = list(path.vertices)
+                for i in range(len(vertices) - 1):
+                    v1 = vertices[i]
+                    v2 = vertices[i + 1]
+                    total += math.hypot(v2[0] - v1[0], v2[1] - v1[1])
+                if path.is_closed and len(vertices) > 1:
+                    total += math.hypot(vertices[0][0] - vertices[-1][0], 
+                                       vertices[0][1] - vertices[-1][1])
+            elif hasattr(path, 'edges'):
+                for edge in path.edges:
+                    edge_type = type(edge).__name__
+                    if edge_type == 'LineEdge':
+                        total += math.hypot(edge.end[0] - edge.start[0], 
+                                           edge.end[1] - edge.start[1])
+                    elif edge_type == 'ArcEdge':
+                        radius = edge.radius
+                        start_angle = math.radians(edge.start_angle)
+                        end_angle = math.radians(edge.end_angle)
+                        angle = end_angle - start_angle
+                        if edge.ccw and angle < 0:
+                            angle += 2 * math.pi
+                        elif not edge.ccw and angle > 0:
+                            angle -= 2 * math.pi
+                        total += abs(radius * angle)
+        return total
+    except:
+        return 0.0
+
+def calc_region(entity):
     return 0.0
+
+def calc_trace_length(entity):
+    try:
+        p0 = entity.dxf.vtx0
+        p1 = entity.dxf.vtx1
+        p2 = entity.dxf.vtx2
+        p3 = entity.dxf.vtx3
+        mid1 = ((p0.x + p1.x) / 2, (p0.y + p1.y) / 2)
+        mid2 = ((p2.x + p3.x) / 2, (p2.y + p3.y) / 2)
+        return math.hypot(mid2[0] - mid1[0], mid2[1] - mid1[1])
+    except:
+        return 0.0
+
+_current_doc = None
+
+def calc_insert_length(entity):
+    global _current_doc
+    try:
+        if _current_doc is None:
+            return 0.0
+        block_name = entity.dxf.name
+        block = _current_doc.blocks.get(block_name)
+        if block is None:
+            return 0.0
+        x_scale = entity.dxf.xscale
+        y_scale = entity.dxf.yscale
+        scale = (abs(x_scale) + abs(y_scale)) / 2
+        total = 0.0
+        for block_entity in block:
+            etype = block_entity.dxftype()
+            if etype in calculators:
+                length = calculators[etype](block_entity)
+                total += length * scale
+        return total
+    except:
+        return 0.0
+
+def calc_text_length(entity):
+    try:
+        text = entity.dxf.text
+        height = entity.dxf.height
+        strokes_per_char = 3
+        return len(text) * height * strokes_per_char
+    except:
+        return 0.0
+
+def calc_mtext_length(entity):
+    try:
+        text = entity.plain_text()
+        height = entity.dxf.char_height
+        text_clean = text.replace('\n', '').replace('\r', '')
+        strokes_per_char = 3
+        return len(text_clean) * height * strokes_per_char
+    except:
+        return 0.0
+
+# ==================== ЦЕНТР ОБЪЕКТА ====================
 
 def get_entity_center(entity):
     entity_type = entity.dxftype()
@@ -199,40 +299,82 @@ def get_entity_center(entity):
         if entity_type == 'LINE':
             s, en = entity.dxf.start, entity.dxf.end
             return ((s.x + en.x) / 2, (s.y + en.y) / 2)
-        elif entity_type == 'CIRCLE': 
+        elif entity_type == 'CIRCLE':
             return (entity.dxf.center.x, entity.dxf.center.y)
-        elif entity_type == 'POINT': 
+        elif entity_type == 'ARC':
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            start_angle = math.radians(entity.dxf.start_angle)
+            end_angle = math.radians(entity.dxf.end_angle)
+            mid_angle = (start_angle + end_angle) / 2
+            if end_angle < start_angle:
+                mid_angle += math.pi
+            return (center.x + radius * 0.5 * math.cos(mid_angle),
+                    center.y + radius * 0.5 * math.sin(mid_angle))
+        elif entity_type == 'ELLIPSE':
+            return (entity.dxf.center.x, entity.dxf.center.y)
+        elif entity_type == 'POINT':
             return (entity.dxf.location.x, entity.dxf.location.y)
-        elif entity_type == 'INSERT': 
+        elif entity_type in ('LWPOLYLINE', 'POLYLINE'):
+            if entity_type == 'LWPOLYLINE':
+                with entity.points('xy') as pts:
+                    points = list(pts)
+            else:
+                points = [(p[0], p[1]) for p in entity.points()]
+            if points:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+        elif entity_type == 'SPLINE':
+            points = list(entity.flattening(0.1))
+            if points:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+        elif entity_type in ('SOLID', '3DFACE', 'TRACE'):
+            p0 = entity.dxf.vtx0
+            p1 = entity.dxf.vtx1
+            p2 = entity.dxf.vtx2
+            p3 = entity.dxf.vtx3
+            return ((p0.x + p1.x + p2.x + p3.x) / 4,
+                    (p0.y + p1.y + p2.y + p3.y) / 4)
+        elif entity_type == 'INSERT':
             return (entity.dxf.insert.x, entity.dxf.insert.y)
-    except: 
+        elif entity_type in ('TEXT', 'MTEXT'):
+            return (entity.dxf.insert.x, entity.dxf.insert.y)
+    except:
         pass
     return (0, 0)
 
+# ==================== СЛОВАРЬ КАЛЬКУЛЯТОРОВ ====================
+
 calculators = {
-    'LINE': calc_line_length, 
-    'CIRCLE': calc_circle_length, 
+    'LINE': calc_line_length,
+    'CIRCLE': calc_circle_length,
     'ARC': calc_arc_length,
-    'ELLIPSE': calc_ellipse_length, 
+    'ELLIPSE': calc_ellipse_length,
     'LWPOLYLINE': calc_lwpolyline_length,
-    'POLYLINE': calc_polyline_length, 
+    'POLYLINE': calc_polyline_length,
     'SPLINE': calc_spline_length,
-    'POINT': calc_point, 
-    'MLINE': calc_mline_length, 
+    'POINT': calc_point,
+    'MLINE': calc_mline_length,
     'HELIX': calc_helix_length,
-    '3DFACE': calc_3dface, 
-    'SOLID': calc_solid, 
+    '3DFACE': calc_3dface,
+    'SOLID': calc_solid,
     'HATCH': calc_hatch_length,
-    'REGION': calc_region, 
-    'TRACE': calc_trace_length, 
+    'REGION': calc_region,
+    'TRACE': calc_trace_length,
     'INSERT': calc_insert_length,
-    'TEXT': calc_text_length, 
+    'TEXT': calc_text_length,
     'MTEXT': calc_mtext_length,
 }
 
+# ==================== ВИЗУАЛИЗАЦИЯ ====================
+
 def visualize_dxf_with_numbers(doc, objects_data):
-    fig, ax = plt.subplots(figsize=(14, 11))
     try:
+        fig, ax = plt.subplots(figsize=(16, 12))
+        
         ctx = RenderContext(doc)
         backend = MatplotlibBackend(ax)
         Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=True)
@@ -240,31 +382,34 @@ def visualize_dxf_with_numbers(doc, objects_data):
         all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
         all_y = [obj['center'][1] for obj in objects_data if obj['center'][1] != 0]
         
-        drawing_size = 10
         if all_x and all_y:
             drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-        
-        marker_size = drawing_size * 0.015
+            marker_size = drawing_size * 0.015
+        else:
+            marker_size = 5
         
         for obj in objects_data:
             num = obj['num']
             x, y = obj['center']
-            if x == 0 and y == 0: 
+            if x == 0 and y == 0:
                 continue
             
-            circle = plt.Circle((x, y), marker_size, color='red', alpha=0.8, zorder=10)
+            circle = plt.Circle((x, y), marker_size, 
+                                color='red', alpha=0.8, zorder=10)
             ax.add_patch(circle)
-            ax.annotate(str(num), (x, y), fontsize=7, fontweight='bold', 
-                       ha='center', va='center', color='white', zorder=11)
+            
+            ax.annotate(str(num), (x, y), 
+                       fontsize=8, fontweight='bold',
+                       ha='center', va='center',
+                       color='white', zorder=11)
         
         ax.set_aspect('equal')
         ax.autoscale()
         ax.axis('off')
         plt.tight_layout()
         
-        # Сохраняем в память
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100)
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
         buf.seek(0)
         img = Image.open(buf)
         plt.close(fig)
@@ -273,29 +418,72 @@ def visualize_dxf_with_numbers(doc, objects_data):
         st.error(f"Ошибка визуализации: {e}")
         return None
 
-# --- КОНЕЦ ВАШЕГО КОДА ---
+# ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
-# --- ИНТЕРФЕЙС САЙТА ---
+st.set_page_config(
+    page_title="DXF Калькулятор Длины Реза v12.0",
+    page_icon="📐",
+    layout="wide"
+)
 
-st.set_page_config(page_title="DXF Calculator Pro", layout="wide")
-st.title("📐 Калькулятор Длины Реза (DXF)")
-st.markdown("**Загрузите файл**, получите таблицу размеров, общую сумму и схему с нумерацией объектов.")
+# Заголовок
+st.title("📐 DXF Калькулятор Длины Реза v12.0")
+st.markdown("""
+**Полная версия с поддержкой всех типов объектов**  
+Загрузите DXF-файл и получите детальный анализ длины реза с визуализацией и нумерацией объектов.
+""")
 
-uploaded_file = st.file_uploader("Выберите файл .dxf", type=["dxf"])
+# Информация о поддерживаемых типах
+with st.expander("ℹ️ Поддерживаемые типы объектов"):
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown("""
+        **Базовые:**
+        - LINE (линия)
+        - CIRCLE (окружность)
+        - ARC (дуга)
+        - ELLIPSE (эллипс)
+        """)
+    with col2:
+        st.markdown("""
+        **Полилинии:**
+        - LWPOLYLINE
+        - POLYLINE
+        - SPLINE
+        - MLINE
+        """)
+    with col3:
+        st.markdown("""
+        **Сложные:**
+        - HATCH (штриховка)
+        - INSERT (блоки)
+        - TEXT/MTEXT
+        - 3DFACE, SOLID, TRACE
+        """)
+
+st.markdown("---")
+
+# Загрузка файла
+uploaded_file = st.file_uploader(
+    "📂 Выберите DXF файл",
+    type=["dxf"],
+    help="Загрузите файл в формате DXF для анализа"
+)
 
 if uploaded_file is not None:
-    with st.spinner('⏳ Анализ DXF файла...'):
+    with st.spinner('⏳ Анализ файла...'):
         try:
-            # Временная загрузка в файл, т.к. ezdxf читает путь
+            # Сохраняем временно
             temp_path = f"temp_{uploaded_file.name}"
             with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
-            # Запуск анализа
+            # Читаем документ
             doc = ezdxf.readfile(temp_path)
-            _current_doc = doc  # ✅ ИСПРАВЛЕНО: используем напрямую
+            _current_doc = doc
             msp = doc.modelspace()
             
+            # Анализ объектов
             objects_data = []
             stats = {}
             total_length = 0.0
@@ -303,81 +491,220 @@ if uploaded_file is not None:
             skipped_types = set()
             
             for entity in msp:
-                etype = entity.dxftype()
-                if etype not in calculators:
-                    skipped_types.add(etype)
+                entity_type = entity.dxftype()
+                
+                if entity_type not in calculators:
+                    skipped_types.add(entity_type)
                     continue
                 
                 try:
-                    length = calculators[etype](entity)
+                    length = calculators[entity_type](entity)
+                    
                     if length > 0.0001:
                         num += 1
                         center = get_entity_center(entity)
                         
                         objects_data.append({
-                            'num': num, 
-                            'type': etype, 
-                            'length': length, 
+                            'num': num,
+                            'type': entity_type,
+                            'length': length,
                             'center': center
                         })
                         
-                        if etype not in stats:
-                            stats[etype] = {'count': 0, 'length': 0.0}
+                        if entity_type not in stats:
+                            stats[entity_type] = {
+                                'count': 0,
+                                'length': 0.0,
+                                'items': []
+                            }
                         
-                        stats[etype]['count'] += 1
-                        stats[etype]['length'] += length
+                        stats[entity_type]['count'] += 1
+                        stats[entity_type]['length'] += length
+                        stats[entity_type]['items'].append({
+                            'num': num,
+                            'length': length
+                        })
+                        
                         total_length += length
                 except:
                     pass
             
-            _current_doc = None  # ✅ ИСПРАВЛЕНО: сброс без del
+            _current_doc = None
             os.remove(temp_path)
             
-            # Сбор результатов
+            # ==================== ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ====================
+            
             if not objects_data:
-                st.warning("⚠️ Похоже, в файле нет поддерживаемых объектов для расчета.")
+                st.warning("⚠️ В файле не найдено объектов для расчета.")
+                if skipped_types:
+                    st.info(f"Пропущенные типы: {', '.join(sorted(skipped_types))}")
             else:
-                # 1. Сводная таблица
-                rows = []
-                for key, val in stats.items():
-                    avg = val['length']/val['count'] if val['count'] else 0
-                    rows.append({
-                        'Тип': key, 
-                        'Кол-во': val['count'], 
-                        'Длина (мм)': round(val['length'], 2), 
-                        'Ср. длина': round(avg, 2)
-                    })
-                
-                df = pd.DataFrame(rows).set_index('Тип')
-                
-                # 2. Графика
-                fig_img = visualize_dxf_with_numbers(doc, objects_data)
-                
-                # 3. Отрисовка интерфейса
+                # Основная информация
                 st.success(f"✅ Успешно обработано: **{len(objects_data)}** объектов")
-                st.info(f"📏 **ИТОГОВАЯ ДЛИНА РЕЗА**: {total_length:.2f} мм ({total_length/1000:.3f} м)")
                 
-                col1, col2 = st.columns([1, 2])
-                
+                # Итоговая длина
+                st.markdown("### 📏 Итоговая длина реза:")
+                col1, col2, col3 = st.columns(3)
                 with col1:
-                    st.subheader("Статистика по типам")
-                    st.dataframe(df.style.format({
-                        "Длина (мм)": "{:.2f}", 
-                        "Ср. длина": "{:.2f}"
-                    }))
-                    if skipped_types:
-                        st.caption(f"Пропущено необрабатываемых типов: {', '.join(skipped_types)}")
-                
+                    st.metric("Миллиметры", f"{total_length:.2f} мм")
                 with col2:
-                    st.subheader("Визуализация чертежа")
+                    st.metric("Сантиметры", f"{total_length/10:.2f} см")
+                with col3:
+                    st.metric("Метры", f"{total_length/1000:.4f} м")
+                
+                st.markdown("---")
+                
+                # Две колонки: Таблицы и Визуализация
+                col_left, col_right = st.columns([1, 1.5])
+                
+                with col_left:
+                    st.markdown("### 📊 Сводная статистика")
+                    
+                    # Создаем сводную таблицу
+                    summary_rows = []
+                    for entity_type in sorted(stats.keys()):
+                        count = stats[entity_type]['count']
+                        length = stats[entity_type]['length']
+                        avg = length / count if count > 0 else 0
+                        summary_rows.append({
+                            'Тип': entity_type,
+                            'Кол-во': count,
+                            'Общая длина (мм)': round(length, 2),
+                            'Средняя (мм)': round(avg, 2)
+                        })
+                    
+                    df_summary = pd.DataFrame(summary_rows)
+                    st.dataframe(
+                        df_summary,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+                    
+                    if skipped_types:
+                        st.caption(f"⚠️ Пропущено типов: {', '.join(sorted(skipped_types))}")
+                    
+                    # Группировка одинаковых
+                    st.markdown("### 📐 Группировка одинаковых")
+                    length_groups = {}
+                    for obj in objects_data:
+                        key = round(obj['length'], 1)
+                        if key not in length_groups:
+                            length_groups[key] = {
+                                'type': obj['type'],
+                                'nums': [],
+                                'length': obj['length']
+                            }
+                        length_groups[key]['nums'].append(obj['num'])
+                    
+                    group_rows = []
+                    for key in sorted(length_groups.keys(), reverse=True):
+                        group = length_groups[key]
+                        count = len(group['nums'])
+                        if count > 1:
+                            group_rows.append({
+                                'Тип': group['type'],
+                                'Длина': f"{group['length']:.2f} мм",
+                                'Кол-во': count,
+                                'Всего': f"{group['length']*count:.2f} мм"
+                            })
+                    
+                    if group_rows:
+                        df_groups = pd.DataFrame(group_rows)
+                        st.dataframe(
+                            df_groups,
+                            use_container_width=True,
+                            hide_index=True
+                        )
+                    else:
+                        st.info("Одинаковых фигур не найдено")
+                
+                with col_right:
+                    st.markdown("### 🎨 Визуализация с нумерацией")
+                    
+                    fig_img = visualize_dxf_with_numbers(doc, objects_data)
+                    
                     if fig_img:
                         st.image(fig_img, use_container_width=True)
                     else:
-                        st.error("Ошибка построения схемы")
-
+                        st.error("Ошибка построения визуализации")
+                
+                # Детальный список объектов
+                st.markdown("---")
+                st.markdown("### 📋 Детальный список всех объектов")
+                
+                # Создаем полный список
+                detail_rows = []
+                for obj in objects_data:
+                    detail_rows.append({
+                        '№': obj['num'],
+                        'Тип': obj['type'],
+                        'Длина (мм)': round(obj['length'], 2),
+                        'Координаты X': round(obj['center'][0], 2),
+                        'Координаты Y': round(obj['center'][1], 2)
+                    })
+                
+                df_detail = pd.DataFrame(detail_rows)
+                
+                # Фильтр по типу
+                selected_types = st.multiselect(
+                    "Фильтр по типу объекта:",
+                    options=sorted(stats.keys()),
+                    default=sorted(stats.keys())
+                )
+                
+                if selected_types:
+                    df_filtered = df_detail[df_detail['Тип'].isin(selected_types)]
+                    st.dataframe(
+                        df_filtered,
+                        use_container_width=True,
+                        hide_index=True,
+                        height=400
+                    )
+                    
+                    # Скачать CSV
+                    csv = df_filtered.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 Скачать детальный отчет (CSV)",
+                        data=csv,
+                        file_name=f"dxf_report_{uploaded_file.name}.csv",
+                        mime="text/csv"
+                    )
+                
         except Exception as e:
-            st.error(f"❌ Произошла критическая ошибка: {e}")
+            st.error(f"❌ Произошла ошибка: {e}")
             import traceback
-            st.code(traceback.format_exc())
+            with st.expander("Показать детали ошибки"):
+                st.code(traceback.format_exc())
+
 else:
-    st.info("👈 Жду загрузки файла DXF...")
+    # Инструкция при отсутствии файла
+    st.info("👈 Загрузите DXF файл для начала анализа")
+    
+    st.markdown("""
+    ### 🚀 Как использовать:
+    
+    1. **Загрузите файл** в формате DXF через форму выше
+    2. **Получите анализ** со следующими данными:
+       - Общая длина реза в мм/см/м
+       - Статистика по типам объектов
+       - Группировка одинаковых фигур
+       - Детальный список всех объектов
+       - Визуализация чертежа с нумерацией
+    3. **Скачайте отчет** в формате CSV
+    
+    ### 💡 Особенности:
+    
+    - ✅ Поддержка 18+ типов объектов DXF
+    - ✅ Учет дуг в полилиниях (bulge)
+    - ✅ Обработка блоков (INSERT) с масштабом
+    - ✅ Визуализация с нумерацией объектов
+    - ✅ Экспорт результатов в CSV
+    """)
+
+# Футер
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: gray; font-size: 12px;'>
+    DXF Calculator v12.0 | Создано для точных расчетов длины реза
+</div>
+""", unsafe_allow_html=True)
