@@ -4,6 +4,7 @@ import math
 import warnings
 import io
 import pandas as pd
+import matplotlib.pyplot as plt
 from PIL import Image
 
 # Импорт библиотек для потока данных
@@ -140,32 +141,57 @@ def calc_spline_length(entity):
     except:
         return 0.0
 
-# Остальные вспомогательные функции расчета (сокращены для компактности кода, логика та же)
-def calc_point(e): return 0.1
-def calc_mline_length(e): return 0.0
-def calc_helix_length(e): return 0.0
-def calc_3dface(e): return 0.0
-def calc_solid(e): return 0.0
-def calc_hatch_length(e): return 0.0
-def calc_region(e): return 0.0
-def calc_trace_length(e): return 0.0
+# Остальные вспомогательные функции расчета
+def calc_point(e): 
+    return 0.1
+
+def calc_mline_length(e): 
+    return 0.0
+
+def calc_helix_length(e): 
+    return 0.0
+
+def calc_3dface(e): 
+    return 0.0
+
+def calc_solid(e): 
+    return 0.0
+
+def calc_hatch_length(e): 
+    return 0.0
+
+def calc_region(e): 
+    return 0.0
+
+def calc_trace_length(e): 
+    return 0.0
+
+# Глобальная переменная для хранения текущего документа
 _current_doc = None
+
 def calc_insert_length(e):
-    global _current_doc
+    global _current_doc  # ✅ ИСПРАВЛЕНО: объявление в начале функции
     try:
-        if _current_doc is None: return 0.0
+        if _current_doc is None: 
+            return 0.0
         bn = e.dxf.name
         blk = _current_doc.blocks.get(bn)
-        if not blk: return 0.0
+        if not blk: 
+            return 0.0
         sc = abs(e.dxf.xscale)
         tot = 0
         for be in blk:
             if be.dxftype() in calculators:
                 tot += calculators[be.dxftype()](be) * sc
         return tot
-    except: return 0.0
-def calc_text_length(e): return 0.0
-def calc_mtext_length(e): return 0.0
+    except: 
+        return 0.0
+
+def calc_text_length(e): 
+    return 0.0
+
+def calc_mtext_length(e): 
+    return 0.0
 
 def get_entity_center(entity):
     entity_type = entity.dxftype()
@@ -173,20 +199,35 @@ def get_entity_center(entity):
         if entity_type == 'LINE':
             s, en = entity.dxf.start, entity.dxf.end
             return ((s.x + en.x) / 2, (s.y + en.y) / 2)
-        elif entity_type == 'CIRCLE': return (entity.dxf.center.x, entity.dxf.center.y)
-        elif entity_type == 'POINT': return (entity.dxf.location.x, entity.dxf.location.y)
-        elif entity_type == 'INSERT': return (entity.dxf.insert.x, entity.dxf.insert.y)
-    except: pass
+        elif entity_type == 'CIRCLE': 
+            return (entity.dxf.center.x, entity.dxf.center.y)
+        elif entity_type == 'POINT': 
+            return (entity.dxf.location.x, entity.dxf.location.y)
+        elif entity_type == 'INSERT': 
+            return (entity.dxf.insert.x, entity.dxf.insert.y)
+    except: 
+        pass
     return (0, 0)
 
 calculators = {
-    'LINE': calc_line_length, 'CIRCLE': calc_circle_length, 'ARC': calc_arc_length,
-    'ELLIPSE': calc_ellipse_length, 'LWPOLYLINE': calc_lwpolyline_length,
-    'POLYLINE': calc_polyline_length, 'SPLINE': calc_spline_length,
-    'POINT': calc_point, 'MLINE': calc_mline_length, 'HELIX': calc_helix_length,
-    '3DFACE': calc_3dface, 'SOLID': calc_solid, 'HATCH': calc_hatch_length,
-    'REGION': calc_region, 'TRACE': calc_trace_length, 'INSERT': calc_insert_length,
-    'TEXT': calc_text_length, 'MTEXT': calc_mtext_length,
+    'LINE': calc_line_length, 
+    'CIRCLE': calc_circle_length, 
+    'ARC': calc_arc_length,
+    'ELLIPSE': calc_ellipse_length, 
+    'LWPOLYLINE': calc_lwpolyline_length,
+    'POLYLINE': calc_polyline_length, 
+    'SPLINE': calc_spline_length,
+    'POINT': calc_point, 
+    'MLINE': calc_mline_length, 
+    'HELIX': calc_helix_length,
+    '3DFACE': calc_3dface, 
+    'SOLID': calc_solid, 
+    'HATCH': calc_hatch_length,
+    'REGION': calc_region, 
+    'TRACE': calc_trace_length, 
+    'INSERT': calc_insert_length,
+    'TEXT': calc_text_length, 
+    'MTEXT': calc_mtext_length,
 }
 
 def visualize_dxf_with_numbers(doc, objects_data):
@@ -208,11 +249,13 @@ def visualize_dxf_with_numbers(doc, objects_data):
         for obj in objects_data:
             num = obj['num']
             x, y = obj['center']
-            if x == 0 and y == 0: continue
+            if x == 0 and y == 0: 
+                continue
             
             circle = plt.Circle((x, y), marker_size, color='red', alpha=0.8, zorder=10)
             ax.add_patch(circle)
-            ax.annotate(str(num), (x, y), fontsize=7, fontweight='bold', ha='center', va='center', color='white', zorder=11)
+            ax.annotate(str(num), (x, y), fontsize=7, fontweight='bold', 
+                       ha='center', va='center', color='white', zorder=11)
         
         ax.set_aspect('equal')
         ax.autoscale()
@@ -227,7 +270,7 @@ def visualize_dxf_with_numbers(doc, objects_data):
         plt.close(fig)
         return img
     except Exception as e:
-        print(f"Error visualizing: {e}")
+        st.error(f"Ошибка визуализации: {e}")
         return None
 
 # --- КОНЕЦ ВАШЕГО КОДА ---
@@ -250,8 +293,7 @@ if uploaded_file is not None:
             
             # Запуск анализа
             doc = ezdxf.readfile(temp_path)
-            global _current_doc
-            _current_doc = doc
+            _current_doc = doc  # ✅ ИСПРАВЛЕНО: используем напрямую
             msp = doc.modelspace()
             
             objects_data = []
@@ -272,7 +314,12 @@ if uploaded_file is not None:
                         num += 1
                         center = get_entity_center(entity)
                         
-                        objects_data.append({'num': num, 'type': etype, 'length': length, 'center': center})
+                        objects_data.append({
+                            'num': num, 
+                            'type': etype, 
+                            'length': length, 
+                            'center': center
+                        })
                         
                         if etype not in stats:
                             stats[etype] = {'count': 0, 'length': 0.0}
@@ -283,7 +330,7 @@ if uploaded_file is not None:
                 except:
                     pass
             
-            del _current_doc
+            _current_doc = None  # ✅ ИСПРАВЛЕНО: сброс без del
             os.remove(temp_path)
             
             # Сбор результатов
@@ -294,7 +341,12 @@ if uploaded_file is not None:
                 rows = []
                 for key, val in stats.items():
                     avg = val['length']/val['count'] if val['count'] else 0
-                    rows.append({'Тип': key, 'Кол-во': val['count'], 'Длина (мм)': round(val['length'], 2), 'Ср. длина': round(avg, 2)})
+                    rows.append({
+                        'Тип': key, 
+                        'Кол-во': val['count'], 
+                        'Длина (мм)': round(val['length'], 2), 
+                        'Ср. длина': round(avg, 2)
+                    })
                 
                 df = pd.DataFrame(rows).set_index('Тип')
                 
@@ -309,7 +361,10 @@ if uploaded_file is not None:
                 
                 with col1:
                     st.subheader("Статистика по типам")
-                    st.dataframe(df.style.format({"Длина (мм)": "{:.2f}", "Ср. длина": "{:.2f}"}))
+                    st.dataframe(df.style.format({
+                        "Длина (мм)": "{:.2f}", 
+                        "Ср. длина": "{:.2f}"
+                    }))
                     if skipped_types:
                         st.caption(f"Пропущено необрабатываемых типов: {', '.join(skipped_types)}")
                 
@@ -321,6 +376,8 @@ if uploaded_file is not None:
                         st.error("Ошибка построения схемы")
 
         except Exception as e:
-            st.error(f"Произошла критическая ошибка: {e}")
+            st.error(f"❌ Произошла критическая ошибка: {e}")
+            import traceback
+            st.code(traceback.format_exc())
 else:
     st.info("👈 Жду загрузки файла DXF...")
