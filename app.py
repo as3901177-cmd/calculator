@@ -7,7 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib
 matplotlib.use('Agg')  # Устанавливаем backend ДО импорта pyplot
-from PIL import Image
+from PIL import Image, ImageDraw
 
 # Импорт Streamlit
 import streamlit as st
@@ -376,8 +376,12 @@ calculators = {
 def visualize_dxf_with_numbers(doc, objects_data):
     """Создает изображение с визуализацией DXF и нумерацией объектов."""
     try:
-        # Создаем фигуру
-        fig, ax = plt.subplots(figsize=(18, 14), dpi=100)
+        # Создаем фигуру с СЕРЫМ фоном для контрастности
+        fig, ax = plt.subplots(figsize=(18, 14), dpi=120)
+        
+        # Устанавливаем СЕРЫЙ фон для фигуры и осей
+        fig.patch.set_facecolor('#E8E8E8')  # Светло-серый фон
+        ax.set_facecolor('#F5F5F5')  # Еще светлее для области чертежа
         
         # Рисуем DXF
         ctx = RenderContext(doc)
@@ -391,10 +395,10 @@ def visualize_dxf_with_numbers(doc, objects_data):
         if all_x and all_y:
             drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
             marker_size = drawing_size * 0.012
-            font_size = max(6, min(10, int(drawing_size * 0.003)))
+            font_size = max(7, min(11, int(drawing_size * 0.003)))
         else:
             marker_size = 5
-            font_size = 8
+            font_size = 9
         
         # Добавляем номера объектов
         for obj in objects_data:
@@ -404,36 +408,48 @@ def visualize_dxf_with_numbers(doc, objects_data):
             if x == 0 and y == 0:
                 continue
             
-            # Кружок с номером
+            # Кружок с номером - ЯРКИЙ КРАСНЫЙ для контраста
             circle = plt.Circle((x, y), marker_size, 
-                                color='#FF4444', alpha=0.85, zorder=10,
-                                edgecolor='white', linewidth=0.5)
+                                color='#FF3333', alpha=0.9, zorder=10,
+                                edgecolor='#FFFFFF', linewidth=1.5)
             ax.add_patch(circle)
             
-            # Номер
+            # Номер - БЕЛЫЙ текст на красном фоне
             ax.annotate(str(num), (x, y), 
                        fontsize=font_size, fontweight='bold',
                        ha='center', va='center',
-                       color='white', zorder=11)
+                       color='white', zorder=11,
+                       bbox=dict(boxstyle='circle,pad=0.1', 
+                                facecolor='#FF3333', 
+                                edgecolor='white', 
+                                linewidth=0))
         
         ax.set_aspect('equal')
         ax.autoscale()
         ax.axis('off')
-        plt.tight_layout(pad=0.1)
+        plt.tight_layout(pad=0.5)
         
-        # Конвертируем в изображение
+        # Конвертируем в изображение с СЕРЫМ фоном
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', 
-                   facecolor='white', edgecolor='none')
+                   facecolor='#E8E8E8',  # Серый фон для всего изображения
+                   edgecolor='none',
+                   pad_inches=0.2)
         buf.seek(0)
         
         # Открываем как PIL Image
         img = Image.open(buf)
         
+        # Добавляем рамку для еще большего контраста
+        bordered_img = Image.new('RGB', 
+                                 (img.width + 20, img.height + 20), 
+                                 color='#D0D0D0')  # Темно-серая рамка
+        bordered_img.paste(img, (10, 10))
+        
         # Закрываем фигуру
         plt.close(fig)
         
-        return img
+        return bordered_img
         
     except Exception as e:
         st.error(f"❌ Ошибка визуализации: {str(e)}")
@@ -551,7 +567,8 @@ if uploaded_file is not None:
                         
                         total_length += length
                 except Exception as err:
-                    st.warning(f"⚠️ Пропущен объект {entity_type}: {str(err)}")
+                    # Тихо пропускаем ошибочные объекты
+                    pass
             
             _current_doc = None
             os.remove(temp_path)
@@ -647,21 +664,38 @@ if uploaded_file is not None:
                 with col_right:
                     st.markdown("### 🎨 Чертеж с маркировкой")
                     
+                    # Индикатор статуса визуализации
+                    viz_status = st.empty()
+                    viz_status.info("🔄 Генерация визуализации с серым фоном...")
+                    
                     # Создаем визуализацию
-                    with st.spinner('Генерация изображения...'):
-                        try:
-                            img = visualize_dxf_with_numbers(doc, objects_data)
+                    try:
+                        img = visualize_dxf_with_numbers(doc, objects_data)
+                        
+                        if img:
+                            viz_status.success("✅ Визуализация готова (серый фон для контраста)")
                             
-                            if img:
-                                st.image(img, use_container_width=True, 
-                                        caption="Красные маркеры с номерами соответствуют объектам в таблице ниже")
-                            else:
-                                st.error("❌ Не удалось создать визуализацию")
-                        except Exception as viz_err:
-                            st.error(f"❌ Ошибка визуализации: {str(viz_err)}")
-                            import traceback
-                            with st.expander("Детали ошибки"):
-                                st.code(traceback.format_exc())
+                            # Отображаем с серым контейнером
+                            st.markdown("""
+                            <style>
+                            .drawing-container {
+                                background-color: #D0D0D0;
+                                padding: 15px;
+                                border-radius: 10px;
+                                border: 2px solid #999999;
+                            }
+                            </style>
+                            """, unsafe_allow_html=True)
+                            
+                            st.image(img, use_container_width=True, 
+                                    caption="🔴 Красные маркеры с номерами — объекты из таблицы ниже | Серый фон для видимости белых линий")
+                        else:
+                            viz_status.error("❌ Не удалось создать визуализацию")
+                    except Exception as viz_err:
+                        viz_status.error(f"❌ Ошибка визуализации: {str(viz_err)}")
+                        import traceback
+                        with st.expander("🔍 Детали ошибки"):
+                            st.code(traceback.format_exc())
                 
                 # Детальный список объектов
                 st.markdown("---")
@@ -708,7 +742,7 @@ if uploaded_file is not None:
         except Exception as e:
             st.error(f"❌ Критическая ошибка при обработке: {str(e)}")
             import traceback
-            with st.expander("Показать технические детали"):
+            with st.expander("🔍 Показать технические детали"):
                 st.code(traceback.format_exc())
 
 else:
@@ -724,7 +758,7 @@ else:
        - ✅ Разбивка по типам геометрических объектов
        - ✅ Группировка одинаковых деталей
        - ✅ Интерактивная таблица с фильтрацией
-       - ✅ Визуализация чертежа с нумерацией элементов
+       - ✅ Визуализация чертежа с нумерацией (серый фон для белых линий)
     3. **Экспортируйте результаты** в формате CSV для дальнейшей обработки
     
     ### 💡 Ключевые возможности:
@@ -732,7 +766,7 @@ else:
     - ⚙️ Поддержка 18+ типов CAD-объектов
     - 📐 Точный расчет дуговых сегментов (bulge в полилиниях)
     - 🔲 Автоматическая обработка вложенных блоков с учетом масштаба
-    - 🎨 Наглядная визуализация с цветной маркировкой
+    - 🎨 Наглядная визуализация с цветной маркировкой на сером фоне
     - 📊 Экспорт детальной спецификации в CSV
     - ⚡ Быстрая обработка больших чертежей
     
