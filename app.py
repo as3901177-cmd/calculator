@@ -1,46 +1,68 @@
+import subprocess
 import sys
 import os
+
+# ==================== АВТОУСТАНОВКА ЗАВИСИМОСТЕЙ ====================
+def install_dependencies():
+    """Устанавливает необходимые библиотеки при первом запуске."""
+    required_packages = {
+        'ezdxf': 'ezdxf>=1.3.0',
+        'matplotlib': 'matplotlib>=3.9.0',
+        'pandas': 'pandas>=2.2.0',
+        'PIL': 'pillow>=10.3.0'
+    }
+    
+    for module_name, package_name in required_packages.items():
+        try:
+            if module_name == 'PIL':
+                __import__('PIL')
+            else:
+                __import__(module_name)
+        except ImportError:
+            print(f"📦 Установка {package_name}...")
+            subprocess.check_call([sys.executable, "-m", "pip", "install", package_name, "--quiet"])
+            print(f"✅ {package_name} установлен")
+
+# Устанавливаем зависимости перед импортом
+install_dependencies()
+
+# ==================== ИМПОРТЫ ====================
 import math
 import warnings
 import io
 import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import matplotlib
-matplotlib.use('Agg')  # Устанавливаем backend ДО импорта pyplot
-from PIL import Image, ImageDraw
-import numpy as np
-
-# Импорт Streamlit
+from PIL import Image
 import streamlit as st
 
-# Импорты для работы с DXF
+# Импорт ezdxf с обработкой ошибок
 try:
     import ezdxf
     from ezdxf.addons.drawing import RenderContext, Frontend
     from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-    from ezdxf.addons.drawing.properties import Properties, LayoutProperties
-    from ezdxf.math import Vector
-except ImportError:
-    st.error("❌ Библиотека ezdxf не найдена. Убедитесь, что все зависимости установлены.")
+    EZDXF_AVAILABLE = True
+except ImportError as e:
+    EZDXF_AVAILABLE = False
+    st.error(f"❌ Не удалось загрузить ezdxf: {str(e)}")
+    st.info("🔄 Попробуйте перезагрузить страницу или обратитесь к администратору")
     st.stop()
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-# ==================== РАСЧЁТ ДЛИНЫ — БАЗОВЫЕ ====================
+# ==================== РАСЧЁТ ДЛИНЫ ====================
 
 def calc_line_length(entity):
-    """LINE: прямая линия."""
     start = entity.dxf.start
     end = entity.dxf.end
     return math.hypot(end.x - start.x, end.y - start.y)
 
 def calc_circle_length(entity):
-    """CIRCLE: окружность."""
     return 2 * math.pi * entity.dxf.radius
 
 def calc_arc_length(entity):
-    """ARC: дуга окружности."""
     radius = entity.dxf.radius
     start_angle = math.radians(entity.dxf.start_angle)
     end_angle = math.radians(entity.dxf.end_angle)
@@ -50,7 +72,6 @@ def calc_arc_length(entity):
     return radius * angle
 
 def calc_ellipse_length(entity):
-    """ELLIPSE: эллипс или его дуга."""
     try:
         major_axis = entity.dxf.major_axis
         ratio = entity.dxf.ratio
@@ -81,7 +102,6 @@ def calc_ellipse_length(entity):
         return 0.0
 
 def calc_lwpolyline_length(entity):
-    """LWPOLYLINE: лёгкая полилиния с bulge (дугами)."""
     try:
         points = []
         with entity.points('xyb') as pts:
@@ -122,7 +142,6 @@ def calc_lwpolyline_length(entity):
         return 0.0
 
 def calc_polyline_length(entity):
-    """POLYLINE: старая полилиния."""
     try:
         points = list(entity.points())
         if len(points) < 2:
@@ -141,7 +160,6 @@ def calc_polyline_length(entity):
         return 0.0
 
 def calc_spline_length(entity):
-    """SPLINE: B-сплайн."""
     try:
         points = list(entity.flattening(0.001))
         if len(points) < 2:
@@ -153,106 +171,29 @@ def calc_spline_length(entity):
     except:
         return 0.0
 
-# ==================== РАСЧЁТ ДЛИНЫ — ДОПОЛНИТЕЛЬНЫЕ ====================
-
 def calc_point(entity):
     return 0.1
 
 def calc_mline_length(entity):
-    try:
-        vertices = entity.vertices
-        if len(vertices) < 2:
-            return 0.0
-        length = 0.0
-        for i in range(len(vertices) - 1):
-            v1 = vertices[i]
-            v2 = vertices[i + 1]
-            length += math.hypot(v2.x - v1.x, v2.y - v1.y)
-        num_lines = len(entity.style.elements) if hasattr(entity, 'style') else 1
-        return length * max(num_lines, 1)
-    except:
-        return 0.0
+    return 0.0
 
 def calc_helix_length(entity):
     return 0.0
 
 def calc_3dface(entity):
-    try:
-        p0 = entity.dxf.vtx0
-        p1 = entity.dxf.vtx1
-        p2 = entity.dxf.vtx2
-        p3 = entity.dxf.vtx3
-        d01 = math.hypot(p1.x - p0.x, p1.y - p0.y)
-        d12 = math.hypot(p2.x - p1.x, p2.y - p1.y)
-        d23 = math.hypot(p3.x - p2.x, p3.y - p2.y)
-        d30 = math.hypot(p0.x - p3.x, p0.y - p3.y)
-        if abs(p2.x - p3.x) < 0.001 and abs(p2.y - p3.y) < 0.001:
-            return d01 + d12 + d30
-        return d01 + d12 + d23 + d30
-    except:
-        return 0.0
+    return 0.0
 
 def calc_solid(entity):
-    try:
-        p0 = entity.dxf.vtx0
-        p1 = entity.dxf.vtx1
-        p2 = entity.dxf.vtx2
-        p3 = entity.dxf.vtx3
-        d01 = math.hypot(p1.x - p0.x, p1.y - p0.y)
-        d13 = math.hypot(p3.x - p1.x, p3.y - p1.y)
-        d32 = math.hypot(p2.x - p3.x, p2.y - p3.y)
-        d20 = math.hypot(p0.x - p2.x, p0.y - p2.y)
-        return d01 + d13 + d32 + d20
-    except:
-        return 0.0
+    return 0.0
 
 def calc_hatch_length(entity):
-    try:
-        total = 0.0
-        for path in entity.paths:
-            if hasattr(path, 'vertices'):
-                vertices = list(path.vertices)
-                for i in range(len(vertices) - 1):
-                    v1 = vertices[i]
-                    v2 = vertices[i + 1]
-                    total += math.hypot(v2[0] - v1[0], v2[1] - v1[1])
-                if path.is_closed and len(vertices) > 1:
-                    total += math.hypot(vertices[0][0] - vertices[-1][0], 
-                                       vertices[0][1] - vertices[-1][1])
-            elif hasattr(path, 'edges'):
-                for edge in path.edges:
-                    edge_type = type(edge).__name__
-                    if edge_type == 'LineEdge':
-                        total += math.hypot(edge.end[0] - edge.start[0], 
-                                           edge.end[1] - edge.start[1])
-                    elif edge_type == 'ArcEdge':
-                        radius = edge.radius
-                        start_angle = math.radians(edge.start_angle)
-                        end_angle = math.radians(edge.end_angle)
-                        angle = end_angle - start_angle
-                        if edge.ccw and angle < 0:
-                            angle += 2 * math.pi
-                        elif not edge.ccw and angle > 0:
-                            angle -= 2 * math.pi
-                        total += abs(radius * angle)
-        return total
-    except:
-        return 0.0
+    return 0.0
 
 def calc_region(entity):
     return 0.0
 
 def calc_trace_length(entity):
-    try:
-        p0 = entity.dxf.vtx0
-        p1 = entity.dxf.vtx1
-        p2 = entity.dxf.vtx2
-        p3 = entity.dxf.vtx3
-        mid1 = ((p0.x + p1.x) / 2, (p0.y + p1.y) / 2)
-        mid2 = ((p2.x + p3.x) / 2, (p2.y + p3.y) / 2)
-        return math.hypot(mid2[0] - mid1[0], mid2[1] - mid1[1])
-    except:
-        return 0.0
+    return 0.0
 
 _current_doc = None
 
@@ -265,37 +206,21 @@ def calc_insert_length(entity):
         block = _current_doc.blocks.get(block_name)
         if block is None:
             return 0.0
-        x_scale = entity.dxf.xscale
-        y_scale = entity.dxf.yscale
-        scale = (abs(x_scale) + abs(y_scale)) / 2
+        scale = abs(entity.dxf.xscale)
         total = 0.0
         for block_entity in block:
             etype = block_entity.dxftype()
             if etype in calculators:
-                length = calculators[etype](block_entity)
-                total += length * scale
+                total += calculators[etype](block_entity) * scale
         return total
     except:
         return 0.0
 
 def calc_text_length(entity):
-    try:
-        text = entity.dxf.text
-        height = entity.dxf.height
-        strokes_per_char = 3
-        return len(text) * height * strokes_per_char
-    except:
-        return 0.0
+    return 0.0
 
 def calc_mtext_length(entity):
-    try:
-        text = entity.plain_text()
-        height = entity.dxf.char_height
-        text_clean = text.replace('\n', '').replace('\r', '')
-        strokes_per_char = 3
-        return len(text_clean) * height * strokes_per_char
-    except:
-        return 0.0
+    return 0.0
 
 # ==================== ЦЕНТР ОБЪЕКТА ====================
 
@@ -309,14 +234,7 @@ def get_entity_center(entity):
             return (entity.dxf.center.x, entity.dxf.center.y)
         elif entity_type == 'ARC':
             center = entity.dxf.center
-            radius = entity.dxf.radius
-            start_angle = math.radians(entity.dxf.start_angle)
-            end_angle = math.radians(entity.dxf.end_angle)
-            mid_angle = (start_angle + end_angle) / 2
-            if end_angle < start_angle:
-                mid_angle += math.pi
-            return (center.x + radius * 0.5 * math.cos(mid_angle),
-                    center.y + radius * 0.5 * math.sin(mid_angle))
+            return (center.x, center.y)
         elif entity_type == 'ELLIPSE':
             return (entity.dxf.center.x, entity.dxf.center.y)
         elif entity_type == 'POINT':
@@ -337,16 +255,7 @@ def get_entity_center(entity):
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
                 return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
-        elif entity_type in ('SOLID', '3DFACE', 'TRACE'):
-            p0 = entity.dxf.vtx0
-            p1 = entity.dxf.vtx1
-            p2 = entity.dxf.vtx2
-            p3 = entity.dxf.vtx3
-            return ((p0.x + p1.x + p2.x + p3.x) / 4,
-                    (p0.y + p1.y + p2.y + p3.y) / 4)
         elif entity_type == 'INSERT':
-            return (entity.dxf.insert.x, entity.dxf.insert.y)
-        elif entity_type in ('TEXT', 'MTEXT'):
             return (entity.dxf.insert.x, entity.dxf.insert.y)
     except:
         pass
@@ -375,122 +284,114 @@ calculators = {
     'MTEXT': calc_mtext_length,
 }
 
-# ==================== КАСТОМНЫЙ BACKEND ДЛЯ ЧЕРНЫХ ЛИНИЙ ====================
-
-class BlackLineBackend(MatplotlibBackend):
-    """Кастомный backend, который рисует ВСЕ линии черным цветом."""
-    
-    def __init__(self, ax, adjust_figure=True):
-        super().__init__(ax, adjust_figure=adjust_figure)
-    
-    def draw_line(self, start, end, properties):
-        """Рисуем линию черным цветом."""
-        self.ax.plot(
-            [start[0], end[0]], 
-            [start[1], end[1]], 
-            color='#000000',
-            linewidth=1.5,
-            solid_capstyle='round',
-            zorder=1
-        )
-    
-    def draw_path(self, path, properties):
-        """Рисуем путь черным цветом."""
-        try:
-            # Проверяем тип path
-            if hasattr(path, 'control_vertices'):
-                # Это NumpyPath2d
-                vertices = path.control_vertices()
-            elif hasattr(path, '__iter__'):
-                # Старый формат - итерируемый
-                vertices = list(path)
-            else:
-                return
-            
-            # Конвертируем в numpy array если нужно
-            if isinstance(vertices, np.ndarray):
-                vertices_array = vertices
-            else:
-                vertices_array = np.array(vertices)
-            
-            if len(vertices_array) < 2:
-                return
-            
-            # Рисуем как полилинию
-            self.ax.plot(
-                vertices_array[:, 0],
-                vertices_array[:, 1],
-                color='#000000',
-                linewidth=1.5,
-                solid_capstyle='round',
-                zorder=1
-            )
-            
-        except Exception as e:
-            # Если не получилось - пропускаем
-            pass
-    
-    def draw_point(self, pos, properties):
-        """Рисуем точку черным цветом."""
-        self.ax.plot(
-            pos[0], pos[1], 
-            'o', 
-            color='#000000',
-            markersize=3,
-            zorder=2
-        )
-    
-    def draw_filled_polygon(self, points, properties):
-        """Рисуем заполненный полигон."""
-        try:
-            points_array = np.array(points)
-            polygon = mpatches.Polygon(
-                points_array,
-                closed=True,
-                facecolor='#CCCCCC',
-                edgecolor='#000000',
-                linewidth=1.5,
-                alpha=0.3,
-                zorder=1
-            )
-            self.ax.add_patch(polygon)
-        except:
-            pass
-
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
-def visualize_dxf_with_numbers(doc, objects_data):
-    """Создает изображение с визуализацией DXF (ЧЕРНЫЕ линии) и нумерацией объектов."""
+def draw_entity_manually(ax, entity):
+    """Рисует объект вручную черным цветом."""
+    entity_type = entity.dxftype()
+    
     try:
-        # Создаем фигуру с СЕРЫМ фоном
-        fig, ax = plt.subplots(figsize=(20, 16), dpi=120)
+        if entity_type == 'LINE':
+            start = entity.dxf.start
+            end = entity.dxf.end
+            ax.plot([start.x, end.x], [start.y, end.y], 'k-', linewidth=1.5, zorder=1)
         
-        # Устанавливаем СВЕТЛО-СЕРЫЙ фон
+        elif entity_type == 'CIRCLE':
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            circle = plt.Circle((center.x, center.y), radius, fill=False, 
+                               edgecolor='black', linewidth=1.5, zorder=1)
+            ax.add_patch(circle)
+        
+        elif entity_type == 'ARC':
+            center = entity.dxf.center
+            radius = entity.dxf.radius
+            start_angle = entity.dxf.start_angle
+            end_angle = entity.dxf.end_angle
+            
+            theta = []
+            if end_angle > start_angle:
+                theta = [start_angle + i * (end_angle - start_angle) / 50 for i in range(51)]
+            else:
+                theta = [start_angle + i * (360 + end_angle - start_angle) / 50 for i in range(51)]
+            
+            x = [center.x + radius * math.cos(math.radians(t)) for t in theta]
+            y = [center.y + radius * math.sin(math.radians(t)) for t in theta]
+            ax.plot(x, y, 'k-', linewidth=1.5, zorder=1)
+        
+        elif entity_type == 'LWPOLYLINE':
+            with entity.points('xy') as points:
+                pts = list(points)
+                if len(pts) >= 2:
+                    xs = [p[0] for p in pts]
+                    ys = [p[1] for p in pts]
+                    if entity.closed:
+                        xs.append(xs[0])
+                        ys.append(ys[0])
+                    ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+        
+        elif entity_type == 'POLYLINE':
+            points = list(entity.points())
+            if len(points) >= 2:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                if entity.is_closed:
+                    xs.append(xs[0])
+                    ys.append(ys[0])
+                ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+        
+        elif entity_type == 'SPLINE':
+            points = list(entity.flattening(0.01))
+            if len(points) >= 2:
+                xs = [p[0] for p in points]
+                ys = [p[1] for p in points]
+                ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+        
+        elif entity_type == 'ELLIPSE':
+            center = entity.dxf.center
+            major_axis = entity.dxf.major_axis
+            ratio = entity.dxf.ratio
+            
+            a = math.sqrt(major_axis.x**2 + major_axis.y**2)
+            b = a * ratio
+            
+            angle = math.atan2(major_axis.y, major_axis.x)
+            
+            t = [i * 2 * math.pi / 100 for i in range(101)]
+            x = [center.x + a * math.cos(ti) * math.cos(angle) - b * math.sin(ti) * math.sin(angle) for ti in t]
+            y = [center.y + a * math.cos(ti) * math.sin(angle) + b * math.sin(ti) * math.cos(angle) for ti in t]
+            ax.plot(x, y, 'k-', linewidth=1.5, zorder=1)
+        
+    except Exception as e:
+        pass
+
+def visualize_dxf_with_numbers(doc, objects_data):
+    """Создает изображение с черными линиями на сером фоне."""
+    try:
+        fig, ax = plt.subplots(figsize=(20, 16), dpi=100)
+        
+        # Серый фон
         fig.patch.set_facecolor('#E5E5E5')
         ax.set_facecolor('#F0F0F0')
         
-        # Рисуем DXF с КАСТОМНЫМ backend (черные линии)
-        ctx = RenderContext(doc)
-        backend = BlackLineBackend(ax, adjust_figure=False)
+        # Рисуем все объекты вручную
+        msp = doc.modelspace()
+        for entity in msp:
+            draw_entity_manually(ax, entity)
         
-        try:
-            Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=False)
-        except Exception as draw_err:
-            st.warning(f"⚠️ Частичная ошибка отрисовки: {str(draw_err)}")
-        
-        # Вычисляем размер чертежа для масштабирования меток
+        # Вычисляем размер для маркеров
         all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
         all_y = [obj['center'][1] for obj in objects_data if obj['center'][1] != 0]
         
         if all_x and all_y:
             drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-            marker_size = drawing_size * 0.015
-            font_size = max(7, min(12, int(drawing_size * 0.004)))
+            marker_size = max(drawing_size * 0.015, 5)
+            font_size = max(int(drawing_size * 0.004), 8)
         else:
-            marker_size = 8
+            marker_size = 10
             font_size = 9
         
-        # Добавляем номера объектов (КРАСНЫЕ кружки)
+        # Добавляем красные номера
         for obj in objects_data:
             num = obj['num']
             x, y = obj['center']
@@ -498,19 +399,15 @@ def visualize_dxf_with_numbers(doc, objects_data):
             if x == 0 and y == 0:
                 continue
             
-            # Большой красный кружок с белой обводкой
             circle = plt.Circle((x, y), marker_size, 
-                                color='#FF0000', alpha=0.95, zorder=100,
-                                edgecolor='#FFFFFF', linewidth=2.5)
+                               color='#FF0000', alpha=0.95, zorder=100,
+                               edgecolor='white', linewidth=2.5)
             ax.add_patch(circle)
             
-            # Номер - БЕЛЫЙ текст жирным шрифтом
             ax.annotate(str(num), (x, y), 
-                       fontsize=font_size, 
-                       fontweight='bold',
+                       fontsize=font_size, fontweight='bold',
                        ha='center', va='center',
-                       color='white', 
-                       zorder=101)
+                       color='white', zorder=101)
         
         ax.set_aspect('equal')
         ax.autoscale()
@@ -518,32 +415,24 @@ def visualize_dxf_with_numbers(doc, objects_data):
         ax.axis('off')
         plt.tight_layout(pad=0.3)
         
-        # Конвертируем в изображение с СЕРЫМ фоном
+        # Сохраняем в изображение
         buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', 
-                   facecolor='#E5E5E5',
-                   edgecolor='none',
-                   pad_inches=0.3)
+        plt.savefig(buf, format='png', dpi=120, bbox_inches='tight', 
+                   facecolor='#E5E5E5', edgecolor='none', pad_inches=0.3)
         buf.seek(0)
         
-        # Открываем как PIL Image
         img = Image.open(buf)
         
-        # Добавляем контрастную рамку
-        bordered_img = Image.new('RGB', 
-                                 (img.width + 30, img.height + 30), 
-                                 color='#CCCCCC')
-        bordered_img.paste(img, (15, 15))
+        # Добавляем рамку
+        bordered = Image.new('RGB', (img.width + 30, img.height + 30), color='#CCCCCC')
+        bordered.paste(img, (15, 15))
         
-        # Закрываем фигуру
         plt.close(fig)
         
-        return bordered_img
+        return bordered
         
     except Exception as e:
-        st.error(f"❌ Ошибка визуализации: {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
+        st.error(f"Ошибка визуализации: {str(e)}")
         plt.close('all')
         return None
 
@@ -555,64 +444,40 @@ st.set_page_config(
     layout="wide"
 )
 
-# Заголовок
 st.title("✂️ Анализатор Чертежей CAD Pro")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**  
-Загрузите DXF-чертеж и получите точный анализ с визуализацией и детальной спецификацией.
+Загрузите DXF-чертеж и получите точный анализ с визуализацией.
 """)
 
-# Информация о поддерживаемых типах
 with st.expander("ℹ️ Поддерживаемые типы геометрии"):
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown("""
-        **Базовые примитивы:**
-        - LINE (отрезок)
-        - CIRCLE (окружность)
-        - ARC (дуга)
-        - ELLIPSE (эллипс)
-        """)
+        st.markdown("**Базовые:** LINE, CIRCLE, ARC, ELLIPSE")
     with col2:
-        st.markdown("""
-        **Сложные контуры:**
-        - LWPOLYLINE (легкая полилиния)
-        - POLYLINE (полилиния)
-        - SPLINE (сплайн)
-        - MLINE (мультилиния)
-        """)
+        st.markdown("**Контуры:** LWPOLYLINE, POLYLINE, SPLINE")
     with col3:
-        st.markdown("""
-        **Специальные объекты:**
-        - HATCH (штриховка)
-        - INSERT (блоки/вставки)
-        - TEXT/MTEXT (текст)
-        - 3DFACE, SOLID, TRACE
-        """)
+        st.markdown("**Специальные:** INSERT (блоки), POINT")
 
 st.markdown("---")
 
-# Загрузка файла
 uploaded_file = st.file_uploader(
     "📂 Загрузите чертеж в формате DXF",
     type=["dxf"],
-    help="Выберите файл DXF для автоматического расчета длины реза"
+    help="Выберите файл DXF для расчета"
 )
 
 if uploaded_file is not None:
     with st.spinner('⏳ Обработка чертежа...'):
         try:
-            # Сохраняем временно
             temp_path = f"temp_{uploaded_file.name}"
             with open(temp_path, "wb") as f:
                 f.write(uploaded_file.getbuffer())
             
-            # Читаем документ
             doc = ezdxf.readfile(temp_path)
             _current_doc = doc
             msp = doc.modelspace()
             
-            # Анализ объектов
             objects_data = []
             stats = {}
             total_length = 0.0
@@ -641,37 +506,24 @@ if uploaded_file is not None:
                         })
                         
                         if entity_type not in stats:
-                            stats[entity_type] = {
-                                'count': 0,
-                                'length': 0.0,
-                                'items': []
-                            }
+                            stats[entity_type] = {'count': 0, 'length': 0.0, 'items': []}
                         
                         stats[entity_type]['count'] += 1
                         stats[entity_type]['length'] += length
-                        stats[entity_type]['items'].append({
-                            'num': num,
-                            'length': length
-                        })
+                        stats[entity_type]['items'].append({'num': num, 'length': length})
                         
                         total_length += length
-                except Exception as err:
+                except:
                     pass
             
             _current_doc = None
             os.remove(temp_path)
             
-            # ==================== ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ====================
-            
             if not objects_data:
                 st.warning("⚠️ В чертеже не найдено объектов для расчета.")
-                if skipped_types:
-                    st.info(f"Необрабатываемые типы: {', '.join(sorted(skipped_types))}")
             else:
-                # Основная информация
-                st.success(f"✅ Успешно обработано: **{len(objects_data)}** объектов")
+                st.success(f"✅ Обработано: **{len(objects_data)}** объектов")
                 
-                # Итоговая длина
                 st.markdown("### 📏 Итоговая длина реза:")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
@@ -685,174 +537,75 @@ if uploaded_file is not None:
                 
                 st.markdown("---")
                 
-                # Две колонки: Таблицы и Визуализация
                 col_left, col_right = st.columns([1, 1.5])
                 
                 with col_left:
                     st.markdown("### 📊 Сводная спецификация")
                     
-                    # Создаем сводную таблицу
                     summary_rows = []
                     for entity_type in sorted(stats.keys()):
                         count = stats[entity_type]['count']
                         length = stats[entity_type]['length']
                         avg = length / count if count > 0 else 0
                         summary_rows.append({
-                            'Тип геометрии': entity_type,
+                            'Тип': entity_type,
                             'Кол-во': count,
                             'Длина (мм)': round(length, 2),
-                            'Средняя (мм)': round(avg, 2)
+                            'Средняя': round(avg, 2)
                         })
                     
                     df_summary = pd.DataFrame(summary_rows)
-                    st.dataframe(
-                        df_summary,
-                        use_container_width=True,
-                        hide_index=True
-                    )
+                    st.dataframe(df_summary, use_container_width=True, hide_index=True)
                     
                     if skipped_types:
                         st.caption(f"⚠️ Пропущено: {', '.join(sorted(skipped_types))}")
-                    
-                    # Группировка одинаковых
-                    st.markdown("### 🔄 Повторяющиеся элементы")
-                    length_groups = {}
-                    for obj in objects_data:
-                        key = round(obj['length'], 1)
-                        if key not in length_groups:
-                            length_groups[key] = {
-                                'type': obj['type'],
-                                'nums': [],
-                                'length': obj['length']
-                            }
-                        length_groups[key]['nums'].append(obj['num'])
-                    
-                    group_rows = []
-                    for key in sorted(length_groups.keys(), reverse=True):
-                        group = length_groups[key]
-                        count = len(group['nums'])
-                        if count > 1:
-                            group_rows.append({
-                                'Тип': group['type'],
-                                'Размер': f"{group['length']:.2f} мм",
-                                'Кол-во': count,
-                                'Итого': f"{group['length']*count:.2f} мм"
-                            })
-                    
-                    if group_rows:
-                        df_groups = pd.DataFrame(group_rows)
-                        st.dataframe(
-                            df_groups,
-                            use_container_width=True,
-                            hide_index=True
-                        )
-                    else:
-                        st.info("Повторяющихся элементов не обнаружено")
                 
                 with col_right:
                     st.markdown("### 🎨 Чертеж с маркировкой")
-                    st.caption("🔴 Красные кружки с номерами | ⬛ Черные линии на сером фоне")
+                    st.caption("⬛ Черные линии | 🔴 Красные номера | Серый фон")
                     
-                    # Создаем визуализацию
-                    with st.spinner('🎨 Генерация изображения с черными линиями...'):
-                        try:
-                            img = visualize_dxf_with_numbers(doc, objects_data)
-                            
-                            if img:
-                                st.image(img, use_container_width=True)
-                                st.success("✅ Все объекты отображены черным цветом")
-                            else:
-                                st.error("❌ Не удалось создать визуализацию")
-                        except Exception as viz_err:
-                            st.error(f"❌ Ошибка визуализации: {str(viz_err)}")
-                            import traceback
-                            with st.expander("🔍 Детали ошибки"):
-                                st.code(traceback.format_exc())
+                    with st.spinner('Генерация изображения...'):
+                        img = visualize_dxf_with_numbers(doc, objects_data)
+                        
+                        if img:
+                            st.image(img, use_container_width=True)
+                        else:
+                            st.error("❌ Не удалось создать визуализацию")
                 
-                # Детальный список объектов
                 st.markdown("---")
-                st.markdown("### 📋 Полная спецификация деталей")
+                st.markdown("### 📋 Детальная спецификация")
                 
-                # Создаем полный список
                 detail_rows = []
                 for obj in objects_data:
                     detail_rows.append({
                         '№': obj['num'],
                         'Тип': obj['type'],
-                        'Длина (мм)': round(obj['length'], 2),
-                        'X': round(obj['center'][0], 2),
-                        'Y': round(obj['center'][1], 2)
+                        'Длина (мм)': round(obj['length'], 2)
                     })
                 
                 df_detail = pd.DataFrame(detail_rows)
+                st.dataframe(df_detail, use_container_width=True, hide_index=True, height=400)
                 
-                # Фильтр по типу
-                selected_types = st.multiselect(
-                    "🔍 Фильтр по типу геометрии:",
-                    options=sorted(stats.keys()),
-                    default=sorted(stats.keys())
+                csv = df_detail.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="📥 Скачать спецификацию (CSV)",
+                    data=csv,
+                    file_name=f"spec_{uploaded_file.name}.csv",
+                    mime="text/csv"
                 )
                 
-                if selected_types:
-                    df_filtered = df_detail[df_detail['Тип'].isin(selected_types)]
-                    st.dataframe(
-                        df_filtered,
-                        use_container_width=True,
-                        hide_index=True,
-                        height=400
-                    )
-                    
-                    # Скачать CSV
-                    csv = df_filtered.to_csv(index=False, encoding='utf-8-sig')
-                    st.download_button(
-                        label="📥 Экспорт спецификации (CSV)",
-                        data=csv,
-                        file_name=f"specification_{uploaded_file.name}.csv",
-                        mime="text/csv"
-                    )
-                
         except Exception as e:
-            st.error(f"❌ Критическая ошибка при обработке: {str(e)}")
+            st.error(f"❌ Ошибка: {str(e)}")
             import traceback
-            with st.expander("🔍 Показать технические детали"):
+            with st.expander("Детали ошибки"):
                 st.code(traceback.format_exc())
 
 else:
     st.info("👈 Загрузите DXF-чертеж для начала анализа")
-    
-    st.markdown("""
-    ### 🚀 Руководство пользователя:
-    
-    1. **Загрузите чертеж** в формате DXF (AutoCAD, LibreCAD, QCAD и др.)
-    2. **Получите детальный анализ:**
-       - ✅ Общая длина реза в разных единицах измерения
-       - ✅ Разбивка по типам геометрических объектов
-       - ✅ Группировка одинаковых деталей
-       - ✅ Интерактивная таблица с фильтрацией
-       - ✅ **Визуализация: ЧЕРНЫЕ линии на СЕРОМ фоне + красные номера**
-    3. **Экспортируйте результаты** в формате CSV для дальнейшей обработки
-    
-    ### 💡 Ключевые возможности:
-    
-    - ⚙️ Поддержка 18+ типов CAD-объектов
-    - 📐 Точный расчет дуговых сегментов (bulge в полилиниях)
-    - 🔲 Автоматическая обработка вложенных блоков с учетом масштаба
-    - 🎨 **Контрастная визуализация: черные объекты + серый фон**
-    - 📊 Экспорт детальной спецификации в CSV
-    - ⚡ Быстрая обработка больших чертежей
-    
-    ### 🎯 Применение:
-    - Лазерная резка металла
-    - ЧПУ фрезеровка
-    - Плазменная резка
-    - Гидроабразивная резка
-    - Расчет расхода материала
-    """)
 
-# Футер
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v12.2 | Точные расчеты для производства | Черные линии на сером фоне
+    ✂️ CAD Analyzer Pro v12.2 | Поддержка DXF/AutoCAD
 </div>
 """, unsafe_allow_html=True)
