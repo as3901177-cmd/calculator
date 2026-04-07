@@ -5,8 +5,9 @@ import warnings
 import io
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
 import matplotlib
-matplotlib.use('Agg')
+matplotlib.use('Agg')  # Устанавливаем backend ДО импорта pyplot
 from PIL import Image, ImageDraw
 
 # Импорт Streamlit
@@ -17,40 +18,12 @@ try:
     import ezdxf
     from ezdxf.addons.drawing import RenderContext, Frontend
     from ezdxf.addons.drawing.matplotlib import MatplotlibBackend
-    from ezdxf.addons.drawing.properties import RenderContext as RC
+    from ezdxf.addons.drawing.properties import Properties, LayoutProperties
 except ImportError:
-    st.error("Библиотека ezdxf не найдена. Убедитесь, что все зависимости установлены.")
+    st.error("❌ Библиотека ezdxf не найдена. Убедитесь, что все зависимости установлены.")
     st.stop()
 
 warnings.filterwarnings('ignore', category=UserWarning)
-
-# Настройка шрифта Open Sans для matplotlib
-plt.rcParams['font.family'] = 'sans-serif'
-plt.rcParams['font.sans-serif'] = ['Open Sans', 'DejaVu Sans', 'Arial']
-
-# CSS для Streamlit с Open Sans
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Open Sans', sans-serif;
-    }
-    
-    h1, h2, h3, h4, h5, h6 {
-        font-family: 'Open Sans', sans-serif;
-        font-weight: 600;
-    }
-    
-    .stMetric {
-        font-family: 'Open Sans', sans-serif;
-    }
-    
-    .stDataFrame {
-        font-family: 'Open Sans', sans-serif;
-    }
-</style>
-""", unsafe_allow_html=True)
 
 # ==================== РАСЧЁТ ДЛИНЫ — БАЗОВЫЕ ====================
 
@@ -400,39 +373,91 @@ calculators = {
     'MTEXT': calc_mtext_length,
 }
 
+# ==================== КАСТОМНЫЙ BACKEND ДЛЯ ЧЕРНЫХ ЛИНИЙ ====================
+
+class BlackLineBackend(MatplotlibBackend):
+    """Кастомный backend, который рисует ВСЕ линии черным цветом."""
+    
+    def __init__(self, ax, adjust_figure=True):
+        super().__init__(ax, adjust_figure=adjust_figure)
+        # Переопределяем цвета
+        self.default_color = '#000000'  # Черный для всех объектов
+        self.default_linewidth = 1.5
+    
+    def draw_line(self, start, end, properties):
+        """Рисуем линию черным цветом."""
+        self.ax.plot(
+            [start[0], end[0]], 
+            [start[1], end[1]], 
+            color='#000000',  # Черный цвет
+            linewidth=1.5,
+            solid_capstyle='round',
+            zorder=1
+        )
+    
+    def draw_path(self, path, properties):
+        """Рисуем путь черным цветом."""
+        vertices = []
+        codes = []
+        
+        for cmd in path:
+            if cmd[0] == 'move_to':
+                vertices.append(cmd[1])
+                codes.append(1)  # MOVETO
+            elif cmd[0] == 'line_to':
+                vertices.append(cmd[1])
+                codes.append(2)  # LINETO
+            elif cmd[0] == 'curve3_to':
+                vertices.append(cmd[1])
+                vertices.append(cmd[2])
+                codes.append(3)  # CURVE3
+                codes.append(3)
+            elif cmd[0] == 'curve4_to':
+                vertices.append(cmd[1])
+                vertices.append(cmd[2])
+                vertices.append(cmd[3])
+                codes.append(4)  # CURVE4
+                codes.append(4)
+                codes.append(4)
+        
+        if vertices:
+            from matplotlib.path import Path
+            path_obj = Path(vertices, codes)
+            patch = mpatches.PathPatch(
+                path_obj, 
+                facecolor='none', 
+                edgecolor='#000000',  # Черный цвет
+                linewidth=1.5,
+                zorder=1
+            )
+            self.ax.add_patch(patch)
+    
+    def draw_point(self, pos, properties):
+        """Рисуем точку черным цветом."""
+        self.ax.plot(
+            pos[0], pos[1], 
+            'o', 
+            color='#000000',  # Черный цвет
+            markersize=3,
+            zorder=2
+        )
+
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
 def visualize_dxf_with_numbers(doc, objects_data):
-    """Создает изображение с визуализацией DXF и нумерацией объектов."""
+    """Создает изображение с визуализацией DXF (ЧЕРНЫЕ линии) и нумерацией объектов."""
     try:
-        # Создаем фигуру с белым фоном
-        fig, ax = plt.subplots(figsize=(18, 14), dpi=120)
+        # Создаем фигуру с СЕРЫМ фоном
+        fig, ax = plt.subplots(figsize=(20, 16), dpi=120)
         
-        # Белый фон
-        fig.patch.set_facecolor('white')
-        ax.set_facecolor('white')
+        # Устанавливаем СВЕТЛО-СЕРЫЙ фон
+        fig.patch.set_facecolor('#E5E5E5')
+        ax.set_facecolor('#F0F0F0')
         
-        # Рисуем DXF с черными линиями
+        # Рисуем DXF с КАСТОМНЫМ backend (черные линии)
         ctx = RenderContext(doc)
-        
-        # Переопределяем цвета на черный
-        ctx.set_current_layout(doc.modelspace())
-        
-        backend = MatplotlibBackend(ax)
-        
-        # Рендерим все линии черным цветом
-        for entity in doc.modelspace():
-            if entity.dxftype() in ['LINE', 'CIRCLE', 'ARC', 'ELLIPSE', 
-                                    'LWPOLYLINE', 'POLYLINE', 'SPLINE']:
-                try:
-                    # Временно меняем цвет на черный
-                    original_color = entity.dxf.color if hasattr(entity.dxf, 'color') else None
-                    if hasattr(entity.dxf, 'color'):
-                        entity.dxf.color = 7  # Черный в AutoCAD
-                except:
-                    pass
-        
-        Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=True)
+        backend = BlackLineBackend(ax, adjust_figure=False)
+        Frontend(ctx, backend).draw_layout(doc.modelspace(), finalize=False)
         
         # Вычисляем размер чертежа для масштабирования меток
         all_x = [obj['center'][0] for obj in objects_data if obj['center'][0] != 0]
@@ -440,13 +465,13 @@ def visualize_dxf_with_numbers(doc, objects_data):
         
         if all_x and all_y:
             drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-            marker_size = drawing_size * 0.012
-            font_size = max(7, min(11, int(drawing_size * 0.003)))
+            marker_size = drawing_size * 0.015
+            font_size = max(7, min(12, int(drawing_size * 0.004)))
         else:
-            marker_size = 5
+            marker_size = 8
             font_size = 9
         
-        # Добавляем номера объектов
+        # Добавляем номера объектов (КРАСНЫЕ кружки)
         for obj in objects_data:
             num = obj['num']
             x, y = obj['center']
@@ -454,42 +479,50 @@ def visualize_dxf_with_numbers(doc, objects_data):
             if x == 0 and y == 0:
                 continue
             
-            # Красный кружок с номером
+            # Большой красный кружок с белой обводкой
             circle = plt.Circle((x, y), marker_size, 
-                                color='#DC143C', alpha=0.9, zorder=10,
-                                edgecolor='white', linewidth=1.5)
+                                color='#FF0000', alpha=0.95, zorder=100,
+                                edgecolor='#FFFFFF', linewidth=2.5)
             ax.add_patch(circle)
             
-            # Белый текст на красном фоне
+            # Номер - БЕЛЫЙ текст жирным шрифтом
             ax.annotate(str(num), (x, y), 
-                       fontsize=font_size, fontweight='bold',
+                       fontsize=font_size, 
+                       fontweight='bold',
                        ha='center', va='center',
-                       color='white', zorder=11,
-                       family='sans-serif')
+                       color='white', 
+                       zorder=101)
         
         ax.set_aspect('equal')
         ax.autoscale()
+        ax.margins(0.05)  # Небольшие отступы
         ax.axis('off')
-        plt.tight_layout(pad=0.5)
+        plt.tight_layout(pad=0.3)
         
-        # Конвертируем в изображение с белым фоном
+        # Конвертируем в изображение с СЕРЫМ фоном
         buf = io.BytesIO()
         plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', 
-                   facecolor='white',
+                   facecolor='#E5E5E5',
                    edgecolor='none',
-                   pad_inches=0.2)
+                   pad_inches=0.3)
         buf.seek(0)
         
         # Открываем как PIL Image
         img = Image.open(buf)
         
+        # Добавляем контрастную рамку
+        bordered_img = Image.new('RGB', 
+                                 (img.width + 30, img.height + 30), 
+                                 color='#CCCCCC')
+        bordered_img.paste(img, (15, 15))
+        
         # Закрываем фигуру
         plt.close(fig)
         
-        return img
+        return bordered_img
         
     except Exception as e:
-        st.error(f"Ошибка визуализации: {str(e)}")
+        st.error(f"❌ Ошибка визуализации: {str(e)}")
         import traceback
         st.code(traceback.format_exc())
         plt.close('all')
@@ -499,19 +532,19 @@ def visualize_dxf_with_numbers(doc, objects_data):
 
 st.set_page_config(
     page_title="Анализатор Чертежей CAD Pro",
-    page_icon="📐",
+    page_icon="✂️",
     layout="wide"
 )
 
 # Заголовок
-st.title("Анализатор Чертежей CAD Pro")
+st.title("✂️ Анализатор Чертежей CAD Pro")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**  
 Загрузите DXF-чертеж и получите точный анализ с визуализацией и детальной спецификацией.
 """)
 
 # Информация о поддерживаемых типах
-with st.expander("Поддерживаемые типы геометрии"):
+with st.expander("ℹ️ Поддерживаемые типы геометрии"):
     col1, col2, col3 = st.columns(3)
     with col1:
         st.markdown("""
@@ -542,13 +575,13 @@ st.markdown("---")
 
 # Загрузка файла
 uploaded_file = st.file_uploader(
-    "Загрузите чертеж в формате DXF",
+    "📂 Загрузите чертеж в формате DXF",
     type=["dxf"],
     help="Выберите файл DXF для автоматического расчета длины реза"
 )
 
 if uploaded_file is not None:
-    with st.spinner('Обработка чертежа...'):
+    with st.spinner('⏳ Обработка чертежа...'):
         try:
             # Сохраняем временно
             temp_path = f"temp_{uploaded_file.name}"
@@ -612,15 +645,15 @@ if uploaded_file is not None:
             # ==================== ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ====================
             
             if not objects_data:
-                st.warning("В чертеже не найдено объектов для расчета.")
+                st.warning("⚠️ В чертеже не найдено объектов для расчета.")
                 if skipped_types:
                     st.info(f"Необрабатываемые типы: {', '.join(sorted(skipped_types))}")
             else:
                 # Основная информация
-                st.success(f"Успешно обработано: **{len(objects_data)}** объектов")
+                st.success(f"✅ Успешно обработано: **{len(objects_data)}** объектов")
                 
                 # Итоговая длина
-                st.markdown("### Итоговая длина реза")
+                st.markdown("### 📏 Итоговая длина реза:")
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     st.metric("Миллиметры", f"{total_length:.2f}")
@@ -637,7 +670,7 @@ if uploaded_file is not None:
                 col_left, col_right = st.columns([1, 1.5])
                 
                 with col_left:
-                    st.markdown("### Сводная спецификация")
+                    st.markdown("### 📊 Сводная спецификация")
                     
                     # Создаем сводную таблицу
                     summary_rows = []
@@ -647,7 +680,7 @@ if uploaded_file is not None:
                         avg = length / count if count > 0 else 0
                         summary_rows.append({
                             'Тип геометрии': entity_type,
-                            'Количество': count,
+                            'Кол-во': count,
                             'Длина (мм)': round(length, 2),
                             'Средняя (мм)': round(avg, 2)
                         })
@@ -660,10 +693,10 @@ if uploaded_file is not None:
                     )
                     
                     if skipped_types:
-                        st.caption(f"Пропущено: {', '.join(sorted(skipped_types))}")
+                        st.caption(f"⚠️ Пропущено: {', '.join(sorted(skipped_types))}")
                     
                     # Группировка одинаковых
-                    st.markdown("### Повторяющиеся элементы")
+                    st.markdown("### 🔄 Повторяющиеся элементы")
                     length_groups = {}
                     for obj in objects_data:
                         key = round(obj['length'], 1)
@@ -683,7 +716,7 @@ if uploaded_file is not None:
                             group_rows.append({
                                 'Тип': group['type'],
                                 'Размер': f"{group['length']:.2f} мм",
-                                'Количество': count,
+                                'Кол-во': count,
                                 'Итого': f"{group['length']*count:.2f} мм"
                             })
                     
@@ -698,43 +731,45 @@ if uploaded_file is not None:
                         st.info("Повторяющихся элементов не обнаружено")
                 
                 with col_right:
-                    st.markdown("### Чертеж с маркировкой")
+                    st.markdown("### 🎨 Чертеж с маркировкой")
+                    st.caption("🟥 Красные кружки с номерами | ⬛ Черные линии на сером фоне")
                     
                     # Создаем визуализацию
-                    try:
-                        img = visualize_dxf_with_numbers(doc, objects_data)
-                        
-                        if img:
-                            st.image(img, use_container_width=True, 
-                                    caption="Красные маркеры с номерами соответствуют объектам в таблице ниже")
-                        else:
-                            st.error("Не удалось создать визуализацию")
-                    except Exception as viz_err:
-                        st.error(f"Ошибка визуализации: {str(viz_err)}")
-                        import traceback
-                        with st.expander("Детали ошибки"):
-                            st.code(traceback.format_exc())
+                    with st.spinner('🎨 Генерация изображения с черными линиями...'):
+                        try:
+                            img = visualize_dxf_with_numbers(doc, objects_data)
+                            
+                            if img:
+                                st.image(img, use_container_width=True)
+                                st.success("✅ Все объекты отображены черным цветом на сером фоне")
+                            else:
+                                st.error("❌ Не удалось создать визуализацию")
+                        except Exception as viz_err:
+                            st.error(f"❌ Ошибка визуализации: {str(viz_err)}")
+                            import traceback
+                            with st.expander("🔍 Детали ошибки"):
+                                st.code(traceback.format_exc())
                 
                 # Детальный список объектов
                 st.markdown("---")
-                st.markdown("### Полная спецификация деталей")
+                st.markdown("### 📋 Полная спецификация деталей")
                 
                 # Создаем полный список
                 detail_rows = []
                 for obj in objects_data:
                     detail_rows.append({
-                        'Номер': obj['num'],
+                        '№': obj['num'],
                         'Тип': obj['type'],
                         'Длина (мм)': round(obj['length'], 2),
-                        'Координата X': round(obj['center'][0], 2),
-                        'Координата Y': round(obj['center'][1], 2)
+                        'X': round(obj['center'][0], 2),
+                        'Y': round(obj['center'][1], 2)
                     })
                 
                 df_detail = pd.DataFrame(detail_rows)
                 
                 # Фильтр по типу
                 selected_types = st.multiselect(
-                    "Фильтр по типу геометрии:",
+                    "🔍 Фильтр по типу геометрии:",
                     options=sorted(stats.keys()),
                     default=sorted(stats.keys())
                 )
@@ -751,44 +786,44 @@ if uploaded_file is not None:
                     # Скачать CSV
                     csv = df_filtered.to_csv(index=False, encoding='utf-8-sig')
                     st.download_button(
-                        label="Экспорт спецификации (CSV)",
+                        label="📥 Экспорт спецификации (CSV)",
                         data=csv,
                         file_name=f"specification_{uploaded_file.name}.csv",
                         mime="text/csv"
                     )
                 
         except Exception as e:
-            st.error(f"Критическая ошибка при обработке: {str(e)}")
+            st.error(f"❌ Критическая ошибка при обработке: {str(e)}")
             import traceback
-            with st.expander("Показать технические детали"):
+            with st.expander("🔍 Показать технические детали"):
                 st.code(traceback.format_exc())
 
 else:
     # Инструкция при отсутствии файла
-    st.info("Загрузите DXF-чертеж для начала анализа")
+    st.info("👈 Загрузите DXF-чертеж для начала анализа")
     
     st.markdown("""
-    ### Руководство пользователя
+    ### 🚀 Руководство пользователя:
     
     1. **Загрузите чертеж** в формате DXF (AutoCAD, LibreCAD, QCAD и др.)
     2. **Получите детальный анализ:**
-       - Общая длина реза в разных единицах измерения
-       - Разбивка по типам геометрических объектов
-       - Группировка одинаковых деталей
-       - Интерактивная таблица с фильтрацией
-       - Визуализация чертежа с нумерацией элементов
+       - ✅ Общая длина реза в разных единицах измерения
+       - ✅ Разбивка по типам геометрических объектов
+       - ✅ Группировка одинаковых деталей
+       - ✅ Интерактивная таблица с фильтрацией
+       - ✅ **Визуализация: ЧЕРНЫЕ линии на СЕРОМ фоне + красные номера**
     3. **Экспортируйте результаты** в формате CSV для дальнейшей обработки
     
-    ### Ключевые возможности
+    ### 💡 Ключевые возможности:
     
-    - Поддержка 18+ типов CAD-объектов
-    - Точный расчет дуговых сегментов (bulge в полилиниях)
-    - Автоматическая обработка вложенных блоков с учетом масштаба
-    - Наглядная визуализация с цветной маркировкой
-    - Экспорт детальной спецификации в CSV
-    - Быстрая обработка больших чертежей
+    - ⚙️ Поддержка 18+ типов CAD-объектов
+    - 📐 Точный расчет дуговых сегментов (bulge в полилиниях)
+    - 🔲 Автоматическая обработка вложенных блоков с учетом масштаба
+    - 🎨 **Контрастная визуализация: черные объекты + серый фон**
+    - 📊 Экспорт детальной спецификации в CSV
+    - ⚡ Быстрая обработка больших чертежей
     
-    ### Применение
+    ### 🎯 Применение:
     - Лазерная резка металла
     - ЧПУ фрезеровка
     - Плазменная резка
@@ -800,6 +835,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    CAD Analyzer Pro v12.0 | Точные расчеты для производства | Поддержка DXF/AutoCAD
+    ✂️ CAD Analyzer Pro v12.1 | Точные расчеты для производства | Черные линии на сером фоне
 </div>
 """, unsafe_allow_html=True)
