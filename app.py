@@ -325,7 +325,7 @@ def draw_entity_manually(ax, entity):
         pass
 
 def visualize_dxf_with_numbers(doc, objects_data):
-    """Создает визуализацию с черными линиями на сером фоне."""
+    """Создает визуализацию с компактными маркерами."""
     try:
         # Создаём фигуру с серым фоном
         fig, ax = plt.subplots(figsize=(18, 14), dpi=100)
@@ -345,13 +345,12 @@ def visualize_dxf_with_numbers(doc, objects_data):
         
         if all_x and all_y:
             drawing_size = max(max(all_x) - min(all_x), max(all_y) - min(all_y))
-            marker_size = max(drawing_size * 0.015, 8)
-            font_size = max(int(drawing_size * 0.004), 9)
+            # ✅ УМЕНЬШЕННЫЙ размер шрифта
+            font_size = max(int(drawing_size * 0.003), 7)
         else:
-            marker_size = 10
-            font_size = 9
+            font_size = 8
         
-        # Добавляем КРАСНЫЕ номера
+        # Добавляем КОМПАКТНЫЕ номера
         for obj in objects_data:
             num = obj['num']
             x, y = obj['center']
@@ -359,17 +358,21 @@ def visualize_dxf_with_numbers(doc, objects_data):
             if x == 0 and y == 0:
                 continue
             
-            # Красный кружок с белой обводкой
-            circle = plt.Circle((x, y), marker_size, 
-                               color='#FF0000', alpha=0.95, zorder=100,
-                               edgecolor='white', linewidth=2.5)
-            ax.add_patch(circle)
-            
-            # Белый номер
+            # ✅ ИСПОЛЬЗУЕМ BBOX ВМЕСТО КРУЖКА - автоматический размер под текст
             ax.annotate(str(num), (x, y), 
-                       fontsize=font_size, fontweight='bold',
-                       ha='center', va='center',
-                       color='white', zorder=101)
+                       fontsize=font_size, 
+                       fontweight='bold',
+                       ha='center', 
+                       va='center',
+                       color='white', 
+                       zorder=101,
+                       bbox=dict(
+                           boxstyle='circle,pad=0.35',  # ✅ Минимальный отступ вокруг текста
+                           facecolor='#FF0000',  # Красный фон
+                           edgecolor='white',     # Белая обводка
+                           linewidth=1.5,
+                           alpha=0.95
+                       ))
         
         ax.set_aspect('equal')
         ax.autoscale()
@@ -557,7 +560,7 @@ if uploaded_file is not None:
                 
                 with col_right:
                     st.markdown("### 🎨 Чертеж с маркировкой")
-                    st.caption("⬛ Черные линии | 🔴 Красные номера | Серый фон для контраста")
+                    st.caption("⬛ Черные линии | 🔴 Компактные номера | Серый фон")
                     
                     with st.spinner('Генерация визуализации...'):
                         fig = visualize_dxf_with_numbers(doc, objects_data)
@@ -621,14 +624,14 @@ else:
        - ✅ Общая длина реза в мм/см/м
        - ✅ Статистика по типам объектов
        - ✅ Группировка одинаковых деталей
-       - ✅ Визуализация с нумерацией (черные линии на сером фоне)
+       - ✅ Визуализация с компактной нумерацией
     3. **Экспортируйте результаты** в CSV
     
     ### 💡 Особенности:
     
     - ⚙️ Поддержка основных типов CAD-объектов
     - 📐 Точный расчет дуг в полилиниях (bulge)
-    - 🎨 Контрастная визуализация
+    - 🎨 Компактные маркеры точно по размеру номера
     - 📊 Экспорт в CSV
     - ⚡ Быстрая обработка
     """)
@@ -636,6 +639,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v12.3 | Без Pillow | Поддержка DXF
+    ✂️ CAD Analyzer Pro v12.4 | Компактные маркеры | Поддержка DXF
 </div>
 """, unsafe_allow_html=True)
