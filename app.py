@@ -78,7 +78,7 @@ MAX_ENTITIES_PER_BLOCK = 10000
 MAX_CENTER_POINTS = 500
 MAX_FILE_SIZE_MB = 50
 
-# НОВОЕ: Палитра цветов ACI (AutoCAD Color Index)
+# Палитра цветов ACI (AutoCAD Color Index)
 ACI_COLORS = {
     0: '#000000',      # Чёрный
     1: '#FF0000',      # Красный
@@ -118,7 +118,7 @@ ACI_COLORS = {
 def get_aci_color(color_id: int) -> str:
     """
     Преобразует ACI номер цвета в HEX код.
-    НОВОЕ: Полная поддержка цветов с кешированием
+    Полная поддержка цветов с кешированием
     """
     if color_id in ACI_COLORS:
         return ACI_COLORS[color_id]
@@ -194,11 +194,11 @@ class DXFObject:
     entity: Any = None
     layer: str = ""
     color: int = 256
-    original_color: int = 256  # НОВОЕ: Сохраняем исходный цвет
+    original_color: int = 256
     status: ObjectStatus = ObjectStatus.NORMAL
     original_length: float = 0.0
     issue_description: str = ""
-    is_closed: bool = False  # НОВОЕ v23: Флаг замкнутости
+    is_closed: bool = False
 
 
 # ==================== DATACLASS ДЛЯ ОШИБКИ ====================
@@ -377,7 +377,7 @@ class ErrorCollector:
 def safe_float(value: Any) -> Optional[float]:
     """
     Безопасное преобразование в float.
-    ИСПРАВЛЕНИЕ 7, 10, 12: Полная поддержка всех типов
+    Полная поддержка всех типов
     """
     try:
         # Проверка на строки "inf" и "nan"
@@ -386,7 +386,7 @@ def safe_float(value: Any) -> Optional[float]:
             if lower_val in ('inf', '+inf', '-inf', 'nan', 'infinity', '+infinity', '-infinity'):
                 return None
         
-        # ИСПРАВЛЕНИЕ 12: Поддержка Decimal
+        # Поддержка Decimal
         if isinstance(value, Decimal):
             result = float(value)
         else:
@@ -425,7 +425,6 @@ def get_layer_info(entity: Any) -> Tuple[str, int]:
         return "0", 256
 
 
-# НОВОЕ v23: Функция проверки замкнутости
 def check_is_closed(entity: Any) -> bool:
     """
     Проверяет, является ли объект замкнутым.
@@ -468,7 +467,7 @@ def check_is_closed(entity: Any) -> bool:
             try:
                 points = []
                 for i, pt in enumerate(entity.flattening(0.1)):
-                    if i >= 2:  # Берём только первую и последнюю
+                    if i >= 2:
                         points.append((safe_float(pt[0]), safe_float(pt[1])))
                         if i >= MAX_CENTER_POINTS:
                             break
@@ -500,7 +499,7 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
                            collector: ErrorCollector) -> Tuple[float, bool, str]:
     """
     Проверяет корректность вычисленной длины.
-    ИСПРАВЛЕНИЕ 10: Поддержка numpy типов
+    Поддержка numpy типов
     
     Returns:
         Tuple (валидная_длина, успех, описание_проблемы)
@@ -513,7 +512,7 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
         )
         return 0.0, False, "TypeError: None returned"
     
-    # ИСПРАВЛЕНИЕ 10: Более гибкая проверка типа
+    # Более гибкая проверка типа
     try:
         length_float = float(length)
     except (ValueError, TypeError, OverflowError):
@@ -811,7 +810,7 @@ def calc_ellipse_length(entity: Any) -> float:
 def calc_lwpolyline_length(entity: Any) -> float:
     """
     LWPOLYLINE: лёгкая полилиния с bulge.
-    ИСПРАВЛЕНИЕ 3: Правильное получение флага замыкания
+    Правильное получение флага замыкания
     """
     points = []
     try:
@@ -826,7 +825,7 @@ def calc_lwpolyline_length(entity: Any) -> float:
     
     length = 0.0
     
-    # ИСПРАВЛЕНИЕ 3: Для LWPOLYLINE используем .close свойство
+    # Для LWPOLYLINE используем .close свойство
     try:
         # В ezdxf LWPOLYLINE имеет .close как свойство (не is_closed)
         is_closed = entity.close if hasattr(entity, 'close') else bool(entity.dxf.flags & 1)
@@ -933,7 +932,7 @@ def calc_polyline_length(entity: Any) -> float:
 def calc_spline_length(entity: Any) -> float:
     """
     SPLINE: сплайн.
-    ИСПРАВЛЕНИЕ 20: Правильная обработка ограничения точек
+    Правильная обработка ограничения точек
     """
     try:
         points = []
@@ -951,7 +950,7 @@ def calc_spline_length(entity: Any) -> float:
                 x = safe_float(pt[0])
                 y = safe_float(pt[1])
                 
-                # ИСПРАВЛЕНИЕ 4: Увеличиваем счётчик ТОЛЬКО при успехе
+                # Увеличиваем счётчик ТОЛЬКО при успехе
                 if x is not None and y is not None:
                     points.append((x, y))
                     point_count += 1
@@ -1025,7 +1024,7 @@ SILENT_SKIP_TYPES = {'DIMENSION', 'VIEWPORT', 'LAYOUT', 'BLOCK'}
 def get_entity_center(entity: Any) -> Tuple[float, float]:
     """
     Возвращает центр объекта БЕЗ смещения.
-    ИСПРАВЛЕНИЕ 5: Защита от исключений в итераторах
+    Защита от исключений в итераторах
     """
     entity_type = entity.dxftype()
     
@@ -1061,7 +1060,7 @@ def get_entity_center(entity: Any) -> Tuple[float, float]:
             return (x or 0.0, y or 0.0)
         
         elif entity_type in ('LWPOLYLINE', 'POLYLINE'):
-            # ИСПРАВЛЕНИЕ 5: Защита от исключений
+            # Защита от исключений
             try:
                 if entity_type == 'LWPOLYLINE':
                     with entity.points('xy') as pts:
@@ -1120,7 +1119,7 @@ def get_entity_center(entity: Any) -> Tuple[float, float]:
 def normalize_angle(angle_deg: float) -> float:
     """
     Нормализует угол в диапазон [0, 360).
-    ИСПРАВЛЕНИЕ 7: Правильная нормализация
+    Правильная нормализация
     """
     return angle_deg % 360.0
 
@@ -1128,7 +1127,7 @@ def normalize_angle(angle_deg: float) -> float:
 def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[float, float]:
     """
     Возвращает центр объекта СО СМЕЩЕНИЕМ для маркеров.
-    ИСПРАВЛЕНИЕ 6: Защита от исключений в итераторах
+    Защита от исключений в итераторах
     """
     entity_type = entity.dxftype()
     
@@ -1216,7 +1215,7 @@ def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[
         elif entity_type in ('LWPOLYLINE', 'POLYLINE'):
             center = get_entity_center(entity)
             
-            # ИСПРАВЛЕНИЕ 6: Защита от исключений
+            # Защита от исключений
             try:
                 if entity_type == 'LWPOLYLINE':
                     with entity.points('xy') as pts:
@@ -1293,19 +1292,48 @@ def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[
     return (0.0, 0.0)
 
 
+# ==================== ПОДСЧЁТ ВРЕЗОК (v23) ====================
+
+def count_piercings(objects_data: List[DXFObject], collector: ErrorCollector) -> int:
+    """
+    Подсчитывает количество врезок (точек прожига).
+    
+    Правила:
+    - Каждый обработанный объект требует одну врезку
+    - Врезка нужна ПЕРЕД началом движения по контуру (замкнутому или открытому)
+    - Объекты с ошибками НЕ требуют врезку (исключены из обработки)
+    - Объекты с предупреждениями ТРЕБУЮТ врезку (учтены)
+    
+    Returns:
+        Количество врезок
+    """
+    piercing_count = 0
+    
+    for obj in objects_data:
+        # ТОЛЬКО объекты без критических ошибок
+        if obj.status == ObjectStatus.ERROR:
+            continue  # Эти объекты не будут обработаны, врезка не нужна
+        
+        # Все остальные (NORMAL и WARNING) требуют врезку
+        if obj.status in (ObjectStatus.NORMAL, ObjectStatus.WARNING):
+            piercing_count += 1
+    
+    return piercing_count
+
+
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
 def draw_entity_manually(ax: Any, entity: Any, color: str = '#000000', 
                          linewidth: float = 1.5, use_original_color: bool = False) -> bool:
     """
     Рисует объект вручную с указанным цветом.
-    НОВОЕ: Добавлена поддержка исходных цветов из файла
-    ИСПРАВЛЕНИЕ 4, 6: Правильная обработка is_closed
-    ИСПРАВЛЕНИЕ 14: Проверка angle_diff на нулевое значение
+    Добавлена поддержка исходных цветов из файла
+    Правильная обработка is_closed
+    Проверка angle_diff на нулевое значение
     """
     entity_type = entity.dxftype()
     
-    # НОВОЕ: Если нужен исходный цвет, получаем его
+    # Если нужен исходный цвет, получаем его
     if use_original_color:
         _, original_color = get_layer_info(entity)
         color = get_aci_color(original_color)
@@ -1352,7 +1380,7 @@ def draw_entity_manually(ax: Any, entity: Any, color: str = '#000000',
             else:
                 angle_diff = 360 - (start_angle_norm - end_angle_norm)
             
-            # ИСПРАВЛЕНИЕ 14: Проверка angle_diff на нулевое значение
+            # Проверка angle_diff на нулевое значение
             if angle_diff < 0.001:
                 return False
             
@@ -1367,7 +1395,7 @@ def draw_entity_manually(ax: Any, entity: Any, color: str = '#000000',
             return True
         
         elif entity_type == 'LWPOLYLINE':
-            # ИСПРАВЛЕНИЕ 4: Правильная обработка is_closed для LWPOLYLINE
+            # Правильная обработка is_closed для LWPOLYLINE
             try:
                 with entity.points('xy') as points:
                     pts = [(safe_float(p[0]), safe_float(p[1])) for p in points]
@@ -1487,13 +1515,13 @@ def visualize_dxf_with_status_indicators(
     collector: ErrorCollector,
     show_markers: bool = True,
     font_size_multiplier: float = 1.0,
-    use_original_colors: bool = False  # НОВОЕ: Флаг для использования исходных цветов
+    use_original_colors: bool = False
 ) -> Tuple[Optional[Any], Optional[str]]:
     """
     Создает визуализацию с цветовой индикацией статуса объектов.
-    НОВОЕ: Поддержка исходных цветов из файла
-    НОВОЕ v22: Легенда только в режиме индикации ошибок
-    ИСПРАВЛЕНИЕ 2, 19: Добавлена обработка ошибок и возврат информации об ошибке
+    Поддержка исходных цветов из файла
+    Легенда только в режиме индикации ошибок
+    Добавлена обработка ошибок и возврат информации об ошибке
     
     Returns:
         Tuple (фигура, сообщение об ошибке или None если успех)
@@ -1523,7 +1551,7 @@ def visualize_dxf_with_status_indicators(
             if real_object_num in status_by_real_num:
                 status, _ = status_by_real_num[real_object_num]
                 
-                # НОВОЕ: Логика для выбора цвета
+                # Логика для выбора цвета
                 if use_original_colors:
                     # Используем исходный цвет, но с оверлеем для ошибок
                     draw_entity_manually(ax, entity, use_original_color=True, linewidth=1.5)
@@ -1616,7 +1644,7 @@ def visualize_dxf_with_status_indicators(
                         )
                     )
             
-            # НОВОЕ v22: Легенда ТОЛЬКО в режиме индикации ошибок
+            # Легенда ТОЛЬКО в режиме индикации ошибок
             if not use_original_colors:
                 from matplotlib.patches import Patch
                 legend_elements = [
@@ -1652,20 +1680,19 @@ def visualize_dxf_with_status_indicators(
         
         plt.tight_layout(pad=0.3)
         
-        return fig, None  # ИСПРАВЛЕНИЕ 19: Возвращаем None если успех
+        return fig, None
     
     except MemoryError as e:
         error_msg = f"Недостаточно памяти для визуализации: {e}"
         logger.error(error_msg)
-        return None, error_msg  # ИСПРАВЛЕНИЕ 19: Возвращаем сообщение об ошибке
+        return None, error_msg
     
     except Exception as e:
         error_msg = f"Ошибка визуализации: {e}"
         logger.error(error_msg)
-        return None, error_msg  # ИСПРАВЛЕНИЕ 19: Возвращаем сообщение об ошибке
+        return None, error_msg
     
     finally:
-        # ИСПРАВЛЕНИЕ 2: Finally блок для гарантированной очистки
         pass
 
 
@@ -1674,7 +1701,7 @@ def visualize_dxf_with_status_indicators(
 def show_error_report(collector: ErrorCollector):
     """
     Показывает отчёт об ошибках в Streamlit UI.
-    ИСПРАВЛЕНИЕ 8: Правильная структура табов
+    Правильная структура табов
     """
     if not collector.has_issues:
         st.success("✅ Обработка завершена без ошибок")
@@ -1695,7 +1722,7 @@ def show_error_report(collector: ErrorCollector):
         f"🔍 Подробный отчёт о проблемах ({collector.total_issues} записей)",
         expanded=False
     ):
-        # ИСПРАВЛЕНИЕ 8: Правильная построение списка вкладок
+        # Правильная построение списка вкладок
         tab_labels = []
         
         if collector.errors:
@@ -1707,7 +1734,7 @@ def show_error_report(collector: ErrorCollector):
         
         tab_labels.append("📋 Все проблемы")
         
-        # ИСПРАВЛЕНИЕ 8: Гарантируем, что tab_labels не пусты
+        # Гарантируем, что tab_labels не пусты
         if not tab_labels:
             st.info("✅ Проблем не обнаружено")
             return
@@ -1779,8 +1806,9 @@ st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**
 
 ### 🎯 Новое в v23.0:
-✅ **Подсчёт количества врезок** (замкнутых контуров)  
-✅ **Автоматическое определение замкнутых линий**  
+✅ **Правильный подсчёт количества врезок (прожигов)**  
+✅ **Врезка требуется для каждого обрабатываемого объекта**  
+✅ **Объекты с ошибками исключены из врезок**  
 ✅ **Все функции v22.0 сохранены**  
 """)
 
@@ -1810,7 +1838,7 @@ uploaded_file = st.file_uploader(
 )
 
 if uploaded_file is not None:
-    # ИСПРАВЛЕНИЕ 16: Проверка размера файла
+    # Проверка размера файла
     file_size_mb = uploaded_file.size / (1024 * 1024)
     if file_size_mb > MAX_FILE_SIZE_MB:
         st.error(
@@ -1819,7 +1847,7 @@ if uploaded_file is not None:
         )
         st.stop()
     
-    # ИСПРАВЛЕНИЕ 1: Правильная структура try-except
+    # Правильная структура try-except
     collector = ErrorCollector()
     fig = None
     
@@ -1864,7 +1892,6 @@ if uploaded_file is not None:
             color_stats: Dict[int, Dict[str, Any]] = {}
             total_length = 0.0
             skipped_types = set()
-            piercing_count = 0  # НОВОЕ v23: Счётчик врезок
             
             real_object_num = 0
             calc_object_num = 0
@@ -1895,10 +1922,8 @@ if uploaded_file is not None:
                 calc_object_num += 1
                 center = get_entity_center(entity)
                 
-                # НОВОЕ v23: Проверяем замкнутость
+                # Проверяем замкнутость (для информации)
                 is_closed = check_is_closed(entity)
-                if is_closed:
-                    piercing_count += 1
                 
                 dxf_obj = DXFObject(
                     num=calc_object_num,
@@ -1913,7 +1938,7 @@ if uploaded_file is not None:
                     status=status,
                     original_length=length,
                     issue_description=issue_desc,
-                    is_closed=is_closed  # НОВОЕ v23
+                    is_closed=is_closed
                 )
                 
                 objects_data.append(dxf_obj)
@@ -1939,6 +1964,9 @@ if uploaded_file is not None:
                 
                 total_length += length
             
+            # Правильный расчёт врезок
+            piercing_count = count_piercings(objects_data, collector)
+            
             # ==================== ВЫВОД ====================
             show_error_report(collector)
             
@@ -1955,7 +1983,7 @@ if uploaded_file is not None:
                 else:
                     st.success(f"✅ Обработано: **{len(objects_data)}** объектов")
                 
-                # НОВОЕ v23: Метрики с врезками
+                # Правильный вывод врезок
                 st.markdown("### 📏 Итоговая длина реза:")
                 col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
@@ -1967,7 +1995,16 @@ if uploaded_file is not None:
                 with col4:
                     st.metric("Объектов", f"{len(objects_data)}")
                 with col5:
-                    st.metric("🔵 Врезок", f"{piercing_count}")  # НОВОЕ v23
+                    st.metric("🔵 Врезок (прожигов)", f"{piercing_count}")
+                
+                # Дополнительная информация о врезках
+                st.markdown(f"""
+                **📍 Информация о врезках:**
+                - Всего объектов обработано: {len(objects_data)}
+                - Объектов с ошибками (исключены): {len(collector.errors)}
+                - **Врезок (точек прожига): {piercing_count}**
+                - Объектов с предупреждениями: {len(collector.warnings)}
+                """)
                 
                 st.markdown("---")
                 
@@ -2047,7 +2084,7 @@ if uploaded_file is not None:
                             use_original_colors
                         )
                         
-                        # ИСПРАВЛЕНИЕ 19: Правильная обработка ошибок
+                        # Правильная обработка ошибок
                         if fig is not None:
                             st.pyplot(fig, use_container_width=True)
                         else:
@@ -2055,9 +2092,6 @@ if uploaded_file is not None:
                                 st.error(f"❌ {error_msg}")
                             else:
                                 st.error("❌ Не удалось создать визуализацию")
-                
-                # ИСПРАВЛЕНИЕ 17: Правильное управление фигурой в Streamlit
-                # Streamlit сам управляет фигурами после st.pyplot()
         
         except Exception as e:
             collector.add_error('SYSTEM', 0, f"Критическая ошибка: {e}", type(e).__name__)
@@ -2073,8 +2107,10 @@ else:
     ### 📝 О версии v23.0 (НОВАЯ):
     
     **ГЛАВНОЕ ОБНОВЛЕНИЕ:**
-    - ✅ **Подсчёт количества врезок** (замкнутых контуров)
-    - ✅ Автоматическое определение замкнутых линий всех типов
+    - ✅ **Правильный подсчёт количества врезок**
+    - ✅ Врезка требуется для каждого обрабатываемого объекта
+    - ✅ Объекты с ошибками (ERROR) исключены из врезок
+    - ✅ Объекты с предупреждениями (WARNING) требуют врезку
     - ✅ Показ количества врезок в метриках
     
     **ВСЕ ФУНКЦИИ v22.0:**
