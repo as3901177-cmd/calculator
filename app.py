@@ -1422,7 +1422,7 @@ def visualize_dxf_with_status_indicators(
     """
     Создает визуализацию с цветовой индикацией статуса объектов.
     НОВОЕ: Поддержка исходных цветов из файла
-    НОВОЕ v21: Легенда перемещена в нижний левый угол
+    НОВОЕ v22: Легенда только в режиме индикации ошибок
     ИСПРАВЛЕНИЕ 2, 19: Добавлена обработка ошибок и возврат информации об ошибке
     
     Returns:
@@ -1546,24 +1546,25 @@ def visualize_dxf_with_status_indicators(
                         )
                     )
             
-            # НОВОЕ v21: Легенда в нижнем левом углу
-            from matplotlib.patches import Patch
-            legend_elements = [
-                Patch(facecolor='#000000', edgecolor='black', label='✓ Нормальные (учтены)'),
-                Patch(facecolor='#FF8800', edgecolor='black', label='⚠ Коррекция (учтены)'),
-                Patch(facecolor='#FF0000', edgecolor='black', label='✗ Ошибки (исключены)'),
-                Patch(facecolor='#CCCCCC', edgecolor='black', label='- Пропущены'),
-            ]
-            
-            ax.legend(
-                handles=legend_elements,
-                loc='lower left',  # ИЗМЕНЕНО: было 'upper right'
-                fontsize=10,
-                framealpha=0.95,
-                edgecolor='black',
-                fancybox=True,
-                shadow=True
-            )
+            # НОВОЕ v22: Легенда ТОЛЬКО в режиме индикации ошибок
+            if not use_original_colors:
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor='#000000', edgecolor='black', label='✓ Нормальные (учтены)'),
+                    Patch(facecolor='#FF8800', edgecolor='black', label='⚠ Коррекция (учтены)'),
+                    Patch(facecolor='#FF0000', edgecolor='black', label='✗ Ошибки (исключены)'),
+                    Patch(facecolor='#CCCCCC', edgecolor='black', label='- Пропущены'),
+                ]
+                
+                ax.legend(
+                    handles=legend_elements,
+                    loc='lower left',
+                    fontsize=10,
+                    framealpha=0.95,
+                    edgecolor='black',
+                    fancybox=True,
+                    shadow=True
+                )
         
         ax.set_aspect('equal')
         ax.autoscale()
@@ -1698,18 +1699,19 @@ def show_error_report(collector: ErrorCollector):
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
 st.set_page_config(
-    page_title="Анализатор Чертежей CAD Pro v21.0",
+    page_title="Анализатор Чертежей CAD Pro v22.0",
     page_icon="📐",
     layout="wide"
 )
 
-st.title("📐 Анализатор Чертежей CAD Pro v21.0")
+st.title("📐 Анализатор Чертежей CAD Pro v22.0")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**
 
-### 🎯 Новое в v21.0:
-✅ **Легенда перемещена в нижний левый угол** (не загораживает чертёж)  
-✅ **Все функции v17.0 сохранены**  
+### 🎯 Новое в v22.0:
+✅ **Легенда отображается ТОЛЬКО в режиме "Индикация ошибок"**  
+✅ **Чертёж не загораживается легендой в режиме "Исходные цвета"**  
+✅ **Все функции предыдущих версий сохранены**  
 """)
 
 with st.expander("ℹ️ Информация о цветах"):
@@ -1720,12 +1722,14 @@ with st.expander("ℹ️ Информация о цветах"):
     - Линии отображаются теми цветами, которые установлены в DXF файле
     - Ошибки выделяются красной обводкой поверх исходного цвета
     - Предупреждения выделяются оранжевой обводкой
+    - Легенда НЕ отображается (чертёж чистый)
     
-    **Режим 2: Индикация статуса**
+    **Режим 2: Индикация ошибок**
     - Чёрный = Нормальные объекты (учтены)
     - Оранжевый = Предупреждения (учтены с коррекцией)
     - Красный = Ошибки (исключены)
     - Серый = Пропущены
+    - Легенда отображается в левом нижнем углу
     """)
 
 st.markdown("---")
@@ -1927,11 +1931,23 @@ if uploaded_file is not None:
                     st.markdown("### 🎨 Чертеж с цветовой индикацией")
                     
                     # НОВОЕ: Опция выбора режима отображения цветов
-                    display_mode = st.radio(
-                        "Режим отображения:",
-                        options=["Исходные цвета", "Индикация ошибок"],
-                        horizontal=True
-                    )
+                    col_radio, col_legend = st.columns([1, 1])
+                    
+                    with col_radio:
+                        display_mode = st.radio(
+                            "Режим отображения:",
+                            options=["Исходные цвета", "Индикация ошибок"],
+                            horizontal=True
+                        )
+                    
+                    # НОВОЕ v22: Показываем легенду ТОЛЬКО в режиме индикации
+                    with col_legend:
+                        if display_mode == "Индикация ошибок":
+                            st.markdown("**Легенда:**")
+                            st.markdown("🔵 Чёрный = Норма")
+                            st.markdown("🟠 Оранжевый = Коррекция")
+                            st.markdown("🔴 Красный = Ошибка")
+                            st.markdown("⚪ Серый = Пропущен")
                     
                     use_original_colors = display_mode == "Исходные цвета"
                     
@@ -1975,10 +1991,12 @@ if uploaded_file is not None:
 else:
     st.info("👈 Загрузите DXF-чертеж для начала")
     st.markdown("""
-    ### 📝 О версии v21.0 (НОВАЯ):
+    ### 📝 О версии v22.0 (НОВАЯ):
     
     **ГЛАВНОЕ ОБНОВЛЕНИЕ:**
-    - ✅ **Легенда перемещена в нижний левый угол** — не загораживает чертёж
+    - ✅ **Легенда отображается ТОЛЬКО в режиме "Индикация ошибок"**
+    - ✅ **Компактная легенда рядом с переключателем режима**
+    - ✅ **Чистый чертёж в режиме "Исходные цвета"**
     
     **ВСЕ ФУНКЦИИ v17.0:**
     - ✅ Сохранение исходных цветов линий из DXF файла
@@ -1996,6 +2014,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v21.0 | Лицензия MIT
+    ✂️ CAD Analyzer Pro v22.0 | Лицензия MIT
 </div>
 """, unsafe_allow_html=True)
