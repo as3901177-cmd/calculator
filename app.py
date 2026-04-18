@@ -10,9 +10,11 @@ import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.collections import LineCollection
 import streamlit as st
 from functools import lru_cache
-from typing import Tuple, Optional, Dict, List, Any
+from typing import Tuple, Optional, Dict, List, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
 
@@ -64,9 +66,14 @@ MAX_LENGTH = 1_000_000
 MIN_LENGTH = 1e-6
 BULGE_EPSILON = 0.0001
 COORD_EPSILON = 1e-10
-ENTITY_COORD_PRECISION = 10  # Максимум 10 знаков после запятой
-MAX_ENTITIES_PER_BLOCK = 10000  # Защита от слишком сложных блоков
+ENTITY_COORD_PRECISION = 10
+MAX_ENTITIES_PER_BLOCK = 10000
 
+# Цвета для статусов
+COLOR_NORMAL = '#000000'        # Чёрный - нормальные объекты
+COLOR_WARNING = '#FF8800'       # Оранжевый - объекты с предупреждениями
+COLOR_ERROR = '#FF0000'         # Красный - объекты с ошибками
+COLOR_SKIPPED = '#CCCCCC'       # Серый - пропущенные объекты
 
 # ==================== ENUM ДЛЯ ТИПОВ ОШИБОК ====================
 class ErrorSeverity(Enum):
@@ -77,18 +84,29 @@ class ErrorSeverity(Enum):
     INFO = "🔵 Информация"
 
 
+class ObjectStatus(Enum):
+    """Статус объекта в расчёте."""
+    NORMAL = "normal"           # Обработан нормально
+    WARNING = "warning"         # Обработан с коррекцией
+    ERROR = "error"             # Ошибка при обработке
+    SKIPPED = "skipped"         # Пропущен
+
+
 # ==================== DATACLASS ДЛЯ ОБЪЕКТА ====================
 @dataclass
 class DXFObject:
     """Представление объекта DXF с метаданными."""
-    num: int  # Порядковый номер в спецификации (1, 2, 3...)
-    real_num: int  # Реальный номер в файле (с учётом всех объектов)
-    entity_type: str  # Тип: LINE, CIRCLE, ARC и т.д.
-    length: float  # Длина в мм
-    center: Tuple[float, float]  # (x, y)
-    entity: Any = None  # Ссылка на объект ezdxf
-    layer: str = ""  # Слой объекта
-    color: int = 256  # Цвет (256 = By Layer)
+    num: int                                   # Порядковый номер в спецификации
+    real_num: int                              # Реальный номер в файле
+    entity_type: str                           # Тип: LINE, CIRCLE, ARC и т.д.
+    length: float                              # Длина в мм
+    center: Tuple[float, float]                # (x, y)
+    entity: Any = None                         # Ссылка на объект ezdxf
+    layer: str = ""                            # Слой объекта
+    color: int = 256                           # Цвет (256 = By Layer)
+    status: ObjectStatus = ObjectStatus.NORMAL # Статус объекта
+    original_length: float = 0.0               # Оригинальная длина (для сравнения)
+    issue_description: str = ""                # Описание проблемы
 
 
 # ==================== DATACLASS ДЛЯ ОШИБКИ ====================
@@ -116,17 +134,23 @@ class ProcessingIssue:
 class ErrorCollector:
     """
     Собирает ошибки во время обработки.
-    Позволяет показать пользователю что именно не посчиталось.
+    Отслеживает какие объекты имели проблемы.
     """
     
     def __init__(self):
         self.issues: List[ProcessingIssue] = []
+        self.object_issues: Dict[int, List[ProcessingIssue]] = {}  # По номерам объектов
     
-    def add_issue(self, issue: ProcessingIssue):
+    def add_issue(self, issue: ProcessingIssue, object_num: int = 0):
         """Добавляет проблему."""
         self.issues.append(issue)
         
-        # Логирование в зависимости от уровня серьёзности
+        if object_num > 0:
+            if object_num not in self.object_issues:
+                self.object_issues[object_num] = []
+            self.object_issues[object_num].append(issue)
+        
+        # Логирование
         if issue.severity == ErrorSeverity.ERROR:
             logger.error(f"[{issue.entity_type}] #{issue.entity_num}: {issue.description}")
         elif issue.severity == ErrorSeverity.WARNING:
@@ -143,7 +167,7 @@ class ErrorCollector:
             description=error_msg,
             error_class=error_class,
             severity=ErrorSeverity.ERROR
-        ))
+        ), object_num=entity_num)
     
     def add_warning(self, entity_type: str, entity_num: int, warning_msg: str, 
                     error_class: str = ""):
@@ -154,7 +178,7 @@ class ErrorCollector:
             description=warning_msg,
             error_class=error_class,
             severity=ErrorSeverity.WARNING
-        ))
+        ), object_num=entity_num)
     
     def add_skipped(self, entity_type: str, entity_num: int, reason: str):
         """Добавляет пропущенный объект."""
@@ -164,7 +188,7 @@ class ErrorCollector:
             description=reason,
             error_class="",
             severity=ErrorSeverity.SKIPPED
-        ))
+        ), object_num=entity_num)
     
     def add_info(self, entity_type: str, entity_num: int, info_msg: str):
         """Добавляет информационное сообщение."""
@@ -174,7 +198,21 @@ class ErrorCollector:
             description=info_msg,
             error_class="",
             severity=ErrorSeverity.INFO
-        ))
+        ), object_num=entity_num)
+    
+    def has_issue_for_object(self, object_num: int, severity: ErrorSeverity = None) -> bool:
+        """Проверяет наличие проблемы для объекта."""
+        if object_num not in self.object_issues:
+            return False
+        
+        if severity is None:
+            return len(self.object_issues[object_num]) > 0
+        
+        return any(issue.severity == severity for issue in self.object_issues[object_num])
+    
+    def get_issues_for_object(self, object_num: int) -> List[ProcessingIssue]:
+        """Получает все проблемы для объекта."""
+        return self.object_issues.get(object_num, [])
     
     @property
     def errors(self) -> List[ProcessingIssue]:
@@ -283,12 +321,12 @@ def get_layer_info(entity: Any) -> Tuple[str, int]:
 # ==================== ВАЛИДАЦИЯ РЕЗУЛЬТАТОВ ====================
 
 def validate_length_result(length: Any, entity_type: str, entity_num: int, 
-                           collector: ErrorCollector) -> Tuple[float, bool]:
+                           collector: ErrorCollector) -> Tuple[float, bool, str]:
     """
     Проверяет корректность вычисленной длины.
     
     Returns:
-        Tuple (валидная_длина, успех)
+        Tuple (валидная_длина, успех, описание_проблемы)
     """
     # Проверка на None
     if length is None:
@@ -297,7 +335,7 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
             "Функция вернула None вместо числа",
             "TypeError"
         )
-        return 0.0, False
+        return 0.0, False, "TypeError: None returned"
     
     # Проверка на число
     if not isinstance(length, (int, float)):
@@ -306,7 +344,7 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
             f"Некорректный тип результата: {type(length).__name__}",
             "TypeError"
         )
-        return 0.0, False
+        return 0.0, False, f"TypeError: {type(length).__name__}"
     
     # Проверка на NaN
     try:
@@ -317,7 +355,7 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
                 "Возможно повреждены координаты объекта",
                 "ValueError"
             )
-            return 0.0, False
+            return 0.0, False, "ValueError: NaN result"
     except (TypeError, ValueError):
         pass
     
@@ -330,7 +368,7 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
                 "Возможно деление на ноль в геометрии",
                 "ZeroDivisionError"
             )
-            return 0.0, False
+            return 0.0, False, "ZeroDivisionError: Infinity"
     except (TypeError, ValueError):
         pass
     
@@ -342,7 +380,7 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
             f"Используется абсолютное значение",
             "GeometryWarning"
         )
-        return abs(length), True
+        return abs(length), True, "GeometryWarning: Negative length corrected"
     
     # Проверка на аномально большое значение
     if length > MAX_LENGTH:
@@ -352,36 +390,43 @@ def validate_length_result(length: Any, entity_type: str, entity_num: int,
             f"Проверьте единицы измерения чертежа",
             "ScaleWarning"
         )
-        return length, True
+        return length, True, "ScaleWarning: Abnormally large value"
     
-    return length, True
+    return length, True, ""
 
 
 def calc_entity_safe(entity_type: str, entity: Any, entity_num: int, 
-                     calculators: Dict, collector: ErrorCollector) -> float:
+                     calculators: Dict, collector: ErrorCollector) -> Tuple[float, ObjectStatus, str]:
     """
     Безопасный вызов калькулятора с полным сбором ошибок.
     
     Returns:
-        float: длина объекта (0.0 если ошибка)
+        Tuple (длина, статус, описание_проблемы)
     """
     if entity_type not in calculators:
         collector.add_skipped(
             entity_type, entity_num,
             f"Тип '{entity_type}' не поддерживается"
         )
-        return 0.0
+        return 0.0, ObjectStatus.SKIPPED, "Type not supported"
     
     try:
         # Вызов калькулятора
         raw_result = calculators[entity_type](entity)
         
         # Валидация результата
-        validated_length, success = validate_length_result(
+        validated_length, success, issue_desc = validate_length_result(
             raw_result, entity_type, entity_num, collector
         )
         
-        return validated_length if success else 0.0
+        if not success:
+            return 0.0, ObjectStatus.ERROR, issue_desc
+        
+        # Определяем статус на основе наличия предупреждений
+        if issue_desc:
+            return validated_length, ObjectStatus.WARNING, issue_desc
+        
+        return validated_length, ObjectStatus.NORMAL, ""
     
     except AttributeError as e:
         collector.add_error(
@@ -390,7 +435,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Возможно файл создан в нестандартной программе",
             "AttributeError"
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, str(e)
     
     except ZeroDivisionError as e:
         collector.add_error(
@@ -399,7 +444,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Объект может иметь нулевые размеры",
             "ZeroDivisionError"
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, str(e)
     
     except ValueError as e:
         collector.add_error(
@@ -407,7 +452,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Некорректные числовые данные: {e}",
             "ValueError"
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, str(e)
     
     except TypeError as e:
         collector.add_error(
@@ -415,7 +460,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Ошибка типа данных: {e}",
             "TypeError"
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, str(e)
     
     except OverflowError as e:
         collector.add_error(
@@ -424,7 +469,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Слишком большие координаты",
             "OverflowError"
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, str(e)
     
     except MemoryError as e:
         collector.add_error(
@@ -433,7 +478,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Возможно слишком сложный сплайн",
             "MemoryError"
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, str(e)
     
     except RecursionError as e:
         collector.add_error(
@@ -442,7 +487,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Возможно циклическая ссылка в данных",
             "RecursionError"
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, str(e)
     
     except Exception as e:
         collector.add_error(
@@ -450,7 +495,7 @@ def calc_entity_safe(entity_type: str, entity: Any, entity_num: int,
             f"Неожиданная ошибка: {e}",
             type(e).__name__
         )
-        return 0.0
+        return 0.0, ObjectStatus.ERROR, type(e).__name__
 
 
 # ==================== РАСЧЁТ ДЛИНЫ ====================
@@ -501,7 +546,6 @@ def calc_arc_length(entity: Any) -> float:
     
     angle = end_angle - start_angle
     
-    # Нормализуем угол (от 0 до 2π)
     while angle < 0:
         angle += 2 * math.pi
     while angle > 2 * math.pi:
@@ -528,7 +572,6 @@ def calc_ellipse_length(entity: Any) -> float:
     if start_param is None or end_param is None:
         raise ValueError("Некорректные параметры эллипса")
     
-    # Вычисляем полуоси
     try:
         mx = safe_float(major_axis.x)
         my = safe_float(major_axis.y)
@@ -549,28 +592,22 @@ def calc_ellipse_length(entity: Any) -> float:
     if b <= 0:
         raise ValueError(f"Некорректная длина minor_axis: {b}")
     
-    # Вычисляем угловой размер
     angle_span = end_param - start_param
     
-    # Нормализуем угол
     while angle_span < 0:
         angle_span += 2 * math.pi
     while angle_span > 2 * math.pi:
         angle_span -= 2 * math.pi
     
-    # Проверка на нулевую дугу
     if angle_span < 1e-6:
         return 0.0
     
-    # ИСПРАВЛЕНИЕ: Проверка на полный эллипс с допуском
     if abs(angle_span - 2 * math.pi) < 0.01:
-        # Формула Рамануджана для периметра эллипса
         h = ((a - b) ** 2) / ((a + b) ** 2)
         perimeter = math.pi * (a + b) * (1 + 3*h / (10 + math.sqrt(4 - 3*h)))
         return perimeter
     
-    # Численная интеграция для дуги эллипса
-    N = min(1000, max(100, int(angle_span * 100)))  # Адаптивное количество шагов
+    N = min(1000, max(100, int(angle_span * 100)))
     length = 0.0
     
     for i in range(N):
@@ -589,7 +626,7 @@ def calc_ellipse_length(entity: Any) -> float:
 
 
 def calc_lwpolyline_length(entity: Any) -> float:
-    """LWPOLYLINE: лёгкая полилиния с bulge (ИСПРАВЛЕННАЯ)."""
+    """LWPOLYLINE: лёгкая полилиния с bulge."""
     points = []
     try:
         with entity.points('xyb') as pts:
@@ -604,7 +641,6 @@ def calc_lwpolyline_length(entity: Any) -> float:
     length = 0.0
     is_closed = entity.is_closed if hasattr(entity, 'is_closed') else entity.dxf.flags & 1
     
-    # ИСПРАВЛЕНИЕ: Правильное определение количества сегментов
     num_segments = len(points) if is_closed else len(points) - 1
     
     for i in range(num_segments):
@@ -629,36 +665,26 @@ def calc_lwpolyline_length(entity: Any) -> float:
         
         chord = math.hypot(x2 - x1, y2 - y1)
         
-        # Пропускаем слишком короткие отрезки
         if chord < COORD_EPSILON:
             continue
         
-        # ИСПРАВЛЕНИЕ: Если булж близко к нулю, это прямая линия
         if abs(bulge) < BULGE_EPSILON:
             length += chord
         else:
-            # ИСПРАВЛЕНИЕ: Правильная формула для булжа
-            # angle = 4 * atan(bulge), где bulge = sin(angle/2) / cos(angle/2)
-            # Максимальное значение angle при |bulge| -> ∞ это π
             angle = 4 * math.atan(abs(bulge))
             
-            # Защита от слишком больших углов
             if angle > math.pi:
                 angle = math.pi
             
             sin_half = math.sin(angle / 2)
             
-            # Защита от деления на ноль
             if abs(sin_half) < COORD_EPSILON:
                 length += chord
             else:
                 radius = chord / (2 * sin_half)
                 arc_len = radius * angle
                 
-                # ИСПРАВЛЕНИЕ: Защита от аномальных значений
-                # Дуга не может быть значительно больше хорды
                 if arc_len > chord * 100 or not math.isfinite(arc_len):
-                    # Используем хорду вместо аномальной дуги
                     length += chord
                 else:
                     length += arc_len
@@ -667,7 +693,7 @@ def calc_lwpolyline_length(entity: Any) -> float:
 
 
 def calc_polyline_length(entity: Any) -> float:
-    """POLYLINE: полилиния (ИСПРАВЛЕННАЯ)."""
+    """POLYLINE: полилиния."""
     points = []
     try:
         for p in entity.points():
@@ -683,13 +709,11 @@ def calc_polyline_length(entity: Any) -> float:
     
     length = 0.0
     
-    # Суммируем отрезки между точками
     for i in range(len(points) - 1):
         dx = points[i+1][0] - points[i][0]
         dy = points[i+1][1] - points[i][1]
         length += math.hypot(dx, dy)
     
-    # ИСПРАВЛЕНИЕ: Правильная проверка для замкнутой полилинии
     is_closed = entity.is_closed if hasattr(entity, 'is_closed') else entity.dxf.flags & 1
     
     if is_closed and len(points) >= 2:
@@ -701,16 +725,15 @@ def calc_polyline_length(entity: Any) -> float:
 
 
 def calc_spline_length(entity: Any) -> float:
-    """SPLINE: сплайн (ИСПРАВЛЕННАЯ - без утечки памяти)."""
+    """SPLINE: сплайн."""
     try:
-        # ИСПРАВЛЕНИЕ: Потребляем точки постепенно, не загружая всё в памяти
         points = []
         point_count = 0
         
         for pt in entity.flattening(SPLINE_FLATTENING):
             if point_count >= MAX_SPLINE_POINTS:
                 logger.warning(
-                    f"Сплайн ограничен до {MAX_SPLINE_POINTS} точек для защиты памяти"
+                    f"Сплайн ограничен до {MAX_SPLINE_POINTS} точек"
                 )
                 break
             
@@ -752,7 +775,7 @@ def calc_mline_length(entity: Any) -> float:
 
 
 def calc_insert_length(entity: Any) -> float:
-    """INSERT: блок (не обрабатывается на этом уровне)."""
+    """INSERT: блок."""
     return 0.0
 
 
@@ -782,22 +805,14 @@ calculators = {
     'ATTRIB':     calc_attrib_length,
 }
 
-# Типы, которые имеют нулевую длину
 ZERO_LENGTH_TYPES = {'POINT', 'MLINE', 'INSERT', 'TEXT', 'ATTRIB', 'DIMENSION'}
-
-# Типы, которые нужно пропустить без предупреждения
 SILENT_SKIP_TYPES = {'DIMENSION', 'VIEWPORT', 'LAYOUT', 'BLOCK'}
 
 
 # ==================== ОПРЕДЕЛЕНИЕ ЦЕНТРА ОБЪЕКТА ====================
 
 def get_entity_center(entity: Any) -> Tuple[float, float]:
-    """
-    Возвращает центр объекта БЕЗ смещения.
-    
-    Returns:
-        tuple: (x, y) координаты центра или (0, 0) при ошибке
-    """
+    """Возвращает центр объекта БЕЗ смещения."""
     entity_type = entity.dxftype()
     
     try:
@@ -856,7 +871,7 @@ def get_entity_center(entity: Any) -> Tuple[float, float]:
         elif entity_type == 'SPLINE':
             points = []
             for i, pt in enumerate(entity.flattening(0.1)):
-                if i >= 1000:  # Ограничиваем для производительности
+                if i >= 1000:
                     break
                 x, y = safe_float(pt[0]), safe_float(pt[1])
                 if x is not None and y is not None:
@@ -881,9 +896,7 @@ def get_entity_center(entity: Any) -> Tuple[float, float]:
 
 
 def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[float, float]:
-    """
-    Возвращает центр объекта СО СМЕЩЕНИЕМ для маркеров.
-    """
+    """Возвращает центр объекта СО СМЕЩЕНИЕМ для маркеров."""
     entity_type = entity.dxftype()
     
     try:
@@ -1037,9 +1050,16 @@ def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[
 
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
-def draw_entity_manually(ax: Any, entity: Any) -> bool:
+def draw_entity_manually(ax: Any, entity: Any, color: str = COLOR_NORMAL, 
+                         linewidth: float = 1.5) -> bool:
     """
-    Рисует объект вручную ЧЁРНЫМ цветом.
+    Рисует объект вручную с указанным цветом.
+    
+    Args:
+        ax: matplotlib axis
+        entity: объект DXF
+        color: цвет линии
+        linewidth: толщина линии
     
     Returns:
         bool: успешность отрисовки
@@ -1053,7 +1073,7 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
             x2, y2 = safe_coordinate(end)
             
             if None not in (x1, y1, x2, y2):
-                ax.plot([x1, x2], [y1, y2], 'k-', linewidth=1.5, zorder=1)
+                ax.plot([x1, x2], [y1, y2], color=color, linewidth=linewidth, zorder=1)
                 return True
         
         elif entity_type == 'CIRCLE':
@@ -1064,7 +1084,7 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
             if x is not None and y is not None and radius is not None and radius > 0:
                 circle = plt.Circle(
                     (x, y), radius,
-                    fill=False, edgecolor='black', linewidth=1.5, zorder=1
+                    fill=False, edgecolor=color, linewidth=linewidth, zorder=1
                 )
                 ax.add_patch(circle)
                 return True
@@ -1092,7 +1112,7 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
             
             xs = [x + radius * math.cos(math.radians(t)) for t in theta]
             ys = [y + radius * math.sin(math.radians(t)) for t in theta]
-            ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+            ax.plot(xs, ys, color=color, linewidth=linewidth, zorder=1)
             return True
         
         elif entity_type == 'LWPOLYLINE':
@@ -1108,7 +1128,7 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
                         xs.append(xs[0])
                         ys.append(ys[0])
                     
-                    ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+                    ax.plot(xs, ys, color=color, linewidth=linewidth, zorder=1)
                     return True
         
         elif entity_type == 'POLYLINE':
@@ -1125,7 +1145,7 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
                     xs.append(xs[0])
                     ys.append(ys[0])
                 
-                ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+                ax.plot(xs, ys, color=color, linewidth=linewidth, zorder=1)
                 return True
         
         elif entity_type == 'SPLINE':
@@ -1140,7 +1160,7 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
             if len(points) >= 2:
                 xs = [p[0] for p in points]
                 ys = [p[1] for p in points]
-                ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+                ax.plot(xs, ys, color=color, linewidth=linewidth, zorder=1)
                 return True
         
         elif entity_type == 'ELLIPSE':
@@ -1173,7 +1193,7 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
                       + b * math.sin(ti) * math.cos(angle)
                     for ti in t
                 ]
-                ax.plot(xs, ys, 'k-', linewidth=1.5, zorder=1)
+                ax.plot(xs, ys, color=color, linewidth=linewidth, zorder=1)
                 return True
             except (TypeError, ValueError):
                 return False
@@ -1184,33 +1204,70 @@ def draw_entity_manually(ax: Any, entity: Any) -> bool:
     return False
 
 
-def visualize_dxf_with_numbers(doc: Any, objects_data: List[DXFObject], 
-                                show_markers: bool = True,
-                                font_size_multiplier: float = 1.0) -> Optional[Any]:
+def visualize_dxf_with_status_indicators(
+    doc: Any, 
+    objects_data: List[DXFObject],
+    collector: ErrorCollector,
+    show_markers: bool = True,
+    font_size_multiplier: float = 1.0
+) -> Optional[Any]:
     """
-    Создает визуализацию с номерами рядом с линиями.
+    Создает визуализацию с цветовой индикацией статуса объектов.
     
-    ИСПРАВЛЕНИЯ:
-    - Использует ссылки на entity из DXFObject
-    - Правильная привязка маркеров к объектам
-    - Безопасная обработка координат
+    ИСПРАВЛЕНИЯ v15.1:
+    - Объекты с ошибками отмечены КРАСНЫМ цветом
+    - Объекты с предупреждениями отмечены ОРАНЖЕВЫМ цветом
+    - Обычные объекты ЧЁРНЫМ цветом
+    - Пропущенные объекты СЕРЫМ цветом
+    - На чертежe видны маркеры с номерами объектов
+    - Легенда показывает статусы
     
     Returns:
         matplotlib.figure.Figure или None при ошибке
     """
     try:
-        fig, ax = plt.subplots(figsize=(18, 14), dpi=100)
+        fig, ax = plt.subplots(figsize=(20, 16), dpi=100)
         fig.patch.set_facecolor('#E5E5E5')
         ax.set_facecolor('#F0F0F0')
         
         msp = doc.modelspace()
         
-        # Рисуем все объекты
-        for entity in msp:
-            draw_entity_manually(ax, entity)
+        # Создаём словарь статусов по номерам объектов в файле
+        status_by_real_num: Dict[int, Tuple[ObjectStatus, str]] = {}
+        for obj in objects_data:
+            status_by_real_num[obj.real_num] = (obj.status, obj.issue_description)
         
+        # Рисуем все объекты с правильным цветом
+        real_object_num = 0
+        for entity in msp:
+            real_object_num += 1
+            entity_type = entity.dxftype()
+            
+            # Пропускаем неподдерживаемые типы
+            if entity_type not in calculators:
+                continue
+            
+            # Определяем цвет в зависимости от статуса
+            if real_object_num in status_by_real_num:
+                status, _ = status_by_real_num[real_object_num]
+                
+                if status == ObjectStatus.ERROR:
+                    color = COLOR_ERROR
+                    linewidth = 2.0
+                elif status == ObjectStatus.WARNING:
+                    color = COLOR_WARNING
+                    linewidth = 2.0
+                else:
+                    color = COLOR_NORMAL
+                    linewidth = 1.5
+            else:
+                color = COLOR_SKIPPED
+                linewidth = 1.0
+            
+            draw_entity_manually(ax, entity, color=color, linewidth=linewidth)
+        
+        # Рисуем маркеры для объектов расчёта
         if show_markers and objects_data:
-            # Получаем размеры чертежа
             valid_objects = [
                 obj for obj in objects_data
                 if obj.center[0] != 0 or obj.center[1] != 0
@@ -1237,16 +1294,26 @@ def visualize_dxf_with_numbers(doc: Any, objects_data: List[DXFObject],
                     font_size = int(8 * font_size_multiplier)
                     offset_distance = 10
                 
-                # Рисуем маркеры ИСПОЛЬЗУЯ ССЫЛКИ НА ENTITY
+                # Рисуем маркеры
                 for obj in objects_data:
                     if obj.entity is None:
                         continue
                     
-                    # ИСПРАВЛЕНИЕ: Используем entity из объекта напрямую
                     x, y = get_entity_center_with_offset(obj.entity, offset_distance)
                     
                     if x == 0 and y == 0:
                         continue
+                    
+                    # Выбираем цвет маркера в зависимости от статуса
+                    if obj.status == ObjectStatus.ERROR:
+                        marker_color = COLOR_ERROR
+                        marker_bg = '#FF6666'  # Светлый красный
+                    elif obj.status == ObjectStatus.WARNING:
+                        marker_color = COLOR_WARNING
+                        marker_bg = '#FFAA44'  # Светлый оранжевый
+                    else:
+                        marker_color = '#FFFFFF'  # Белый
+                        marker_bg = '#FF0000'  # Красный
                     
                     ax.annotate(
                         str(obj.num),
@@ -1255,21 +1322,50 @@ def visualize_dxf_with_numbers(doc: Any, objects_data: List[DXFObject],
                         fontweight='bold',
                         ha='center',
                         va='center',
-                        color='white',
+                        color=marker_color,
                         zorder=101,
                         bbox=dict(
                             boxstyle='circle,pad=0.35',
-                            facecolor='#FF0000',
+                            facecolor=marker_bg,
                             edgecolor='white',
                             linewidth=1.5,
                             alpha=0.95
                         )
                     )
+            
+            # Легенда
+            from matplotlib.patches import Patch
+            legend_elements = [
+                Patch(facecolor=COLOR_NORMAL, edgecolor='black', label='✓ Нормальные (учтены)'),
+                Patch(facecolor=COLOR_WARNING, edgecolor='black', label='⚠ Коррекция (учтены)'),
+                Patch(facecolor=COLOR_ERROR, edgecolor='black', label='✗ Ошибки (исключены)'),
+                Patch(facecolor=COLOR_SKIPPED, edgecolor='black', label='- Пропущены'),
+            ]
+            
+            ax.legend(
+                handles=legend_elements,
+                loc='upper right',
+                fontsize=10,
+                framealpha=0.95,
+                edgecolor='black',
+                fancybox=True,
+                shadow=True
+            )
         
         ax.set_aspect('equal')
         ax.autoscale()
         ax.margins(0.05)
         ax.axis('off')
+        
+        # Заголовок с информацией
+        title_text = f"Анализ чертежа | Объектов обработано: {len(objects_data)}"
+        if collector.has_errors:
+            title_text += f" | Ошибок: {len(collector.errors)}"
+        if collector.warnings:
+            title_text += f" | Предупреждений: {len(collector.warnings)}"
+        
+        fig.suptitle(title_text, fontsize=12, fontweight='bold')
+        
         plt.tight_layout(pad=0.3)
         
         return fig
@@ -1293,7 +1389,6 @@ def show_error_report(collector: ErrorCollector):
         st.success("✅ Обработка завершена без ошибок")
         return
     
-    # Определяем цвет и иконку блока
     if collector.has_errors:
         st.error(
             f"⚠️ Обнаружены ошибки при обработке: "
@@ -1305,12 +1400,10 @@ def show_error_report(collector: ErrorCollector):
             f"{collector.get_summary()}"
         )
     
-    # Детальный отчёт в раскрывающемся блоке
     with st.expander(
         f"🔍 Подробный отчёт о проблемах ({collector.total_issues} записей)",
         expanded=False
     ):
-        # Вкладки по типам проблем
         tab_labels = []
         
         if collector.errors:
@@ -1327,48 +1420,49 @@ def show_error_report(collector: ErrorCollector):
         
         if collector.errors:
             with tabs[tab_idx]:
-                st.markdown("**Критические ошибки** — объекты не учтены в расчёте:")
+                st.markdown("**Критические ошибки** — объекты НЕ учтены в расчёте (выделены КРАСНЫМ на чертеже):")
                 df_errors = pd.DataFrame([issue.to_dict() for issue in collector.errors])
                 st.dataframe(df_errors, use_container_width=True, hide_index=True)
                 
                 st.info(
                     "💡 Эти объекты исключены из итоговой длины реза. "
+                    "На визуализации они отмечены красным цветом. "
                     "Проверьте файл в CAD-редакторе."
                 )
             tab_idx += 1
         
         if collector.warnings:
             with tabs[tab_idx]:
-                st.markdown("**Предупреждения** — объекты обработаны с коррекцией:")
+                st.markdown("**Предупреждения** — объекты включены в расчёт с коррекцией значений (выделены ОРАНЖЕВЫМ на чертеже):")
                 df_warnings = pd.DataFrame([issue.to_dict() for issue in collector.warnings])
                 st.dataframe(df_warnings, use_container_width=True, hide_index=True)
                 
-                st.info(
+                st.warning(
                     "💡 Эти объекты включены в расчёт, "
-                    "но их значения были скорректированы."
+                    "но их значения были скорректированы. "
+                    "На визуализации они отмечены оранжевым цветом."
                 )
             tab_idx += 1
         
         if collector.skipped:
             with tabs[tab_idx]:
-                st.markdown("**Пропущенные объекты** — не входят в расчёт:")
+                st.markdown("**Пропущенные объекты** — не входят в расчёт (выделены СЕРЫМ на чертеже):")
                 df_skipped = pd.DataFrame([issue.to_dict() for issue in collector.skipped])
                 st.dataframe(df_skipped, use_container_width=True, hide_index=True)
                 
                 st.info(
                     "💡 Эти типы объектов не поддерживаются "
-                    "или имеют нулевую длину реза."
+                    "или имеют нулевую длину реза. "
+                    "На визуализации они отмечены серым цветом."
                 )
             tab_idx += 1
         
-        # Все проблемы вместе
         with tabs[tab_idx]:
             st.markdown("**Полный лог всех проблем:**")
             df_all = collector.get_all_as_dataframe()
             if not df_all.empty:
                 st.dataframe(df_all, use_container_width=True, hide_index=True)
                 
-                # Скачать лог
                 csv_log = df_all.to_csv(index=False, encoding='utf-8-sig')
                 st.download_button(
                     label="📥 Скачать лог ошибок (CSV)",
@@ -1377,7 +1471,6 @@ def show_error_report(collector: ErrorCollector):
                     mime="text/csv"
                 )
         
-        # Влияние на результат
         if collector.has_errors:
             st.markdown("---")
             st.markdown("### 📊 Влияние на результат расчёта")
@@ -1387,13 +1480,13 @@ def show_error_report(collector: ErrorCollector):
                 st.metric(
                     label="Объектов с ошибками",
                     value=len(collector.errors),
-                    help="Эти объекты НЕ включены в итоговую длину"
+                    help="Эти объекты НЕ включены в итоговую длину (красные на чертеже)"
                 )
             with col2:
                 st.metric(
                     label="Предупреждений",
                     value=len(collector.warnings),
-                    help="Эти объекты включены с коррекцией значений"
+                    help="Эти объекты включены с коррекцией значений (оранжевые на чертеже)"
                 )
             
             st.warning(
@@ -1406,24 +1499,62 @@ def show_error_report(collector: ErrorCollector):
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
 st.set_page_config(
-    page_title="Анализатор Чертежей CAD Pro v15.0",
+    page_title="Анализатор Чертежей CAD Pro v15.1",
     page_icon="📐",
     layout="wide"
 )
 
-st.title("📐 Анализатор Чертежей CAD Pro v15.0")
+st.title("📐 Анализатор Чертежей CAD Pro v15.1")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**  
-Загрузите DXF-чертеж и получите точный анализ с визуализацией и детальной спецификацией.
+Загрузите DXF-чертеж и получите точный анализ с визуализацией статуса объектов.
 
-### 🎯 Улучшения v15.0:
-✅ **ИСПРАВЛЕНА нумерация** — теперь маркеры правильно привязаны к объектам  
-✅ **Убрана утечка памяти** в обработке сплайнов  
-✅ **Исправлена работа булжа** в полилиниях  
-✅ **Добавлены типы данных** (dataclass, Enum) для надёжности  
-✅ **Улучшена валидация эллипсов** и параметров  
-✅ **Оптимизирована производительность** при больших чертежах  
+### 🎯 Новое в v15.1:
+✅ **Цветовая индикация статуса** — видите статус каждого объекта на чертеже  
+✅ **Маркеры с номерами** — номера объектов для быстрой идентификации  
+✅ **Легенда статусов** — понимаете что означает каждый цвет  
+✅ **Предупреждения выделены** — объекты с коррекцией отмечены оранжевым  
+✅ **Ошибки выделены красным** — исключённые объекты сразу видны  
 """)
+
+with st.expander("ℹ️ Легенда цветов на чертеже"):
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.markdown("""
+        ### ⬛ Чёрный цвет
+        **Нормальные объекты**
+        - Обработаны корректно
+        - Включены в расчёт
+        - Без изменений
+        """)
+    
+    with col2:
+        st.markdown("""
+        ### 🟠 Оранжевый цвет
+        **Предупреждения**
+        - Включены в расчёт
+        - Значения скорректированы
+        - Требуют проверки
+        """)
+    
+    with col3:
+        st.markdown("""
+        ### 🔴 Красный цвет
+        **Ошибки**
+        - Исключены из расчёта
+        - Не влияют на результат
+        - Требуют исправления
+        """)
+    
+    with col4:
+        st.markdown("""
+        ### ⚪ Серый цвет
+        **Пропущенные**
+        - Не поддерживаемые типы
+        - Нулевая длина
+        - Не учитываются
+        """)
 
 with st.expander("ℹ️ Поддерживаемые типы геометрии"):
     col1, col2, col3 = st.columns(3)
@@ -1461,22 +1592,18 @@ uploaded_file = st.file_uploader(
 if uploaded_file is not None:
     with st.spinner('⏳ Обработка чертежа...'):
         
-        # Инициализируем сборщик ошибок
         collector = ErrorCollector()
         
         try:
-            # Безопасное создание временного файла
             with tempfile.NamedTemporaryFile(suffix='.dxf', delete=False) as tmp:
                 tmp.write(uploaded_file.getbuffer())
                 temp_path = tmp.name
             
             try:
-                # Попытка чтения файла
                 doc = ezdxf.readfile(temp_path)
                 
-                # Проверка версии DXF
                 dxf_version = doc.dxfversion
-                if dxf_version < 'AC1018':  # R2004
+                if dxf_version < 'AC1018':
                     collector.add_warning(
                         'FILE', 0,
                         f"Старая версия DXF: {dxf_version}. "
@@ -1507,7 +1634,6 @@ if uploaded_file is not None:
                 show_error_report(collector)
                 st.stop()
             finally:
-                # Удаляем временный файл
                 try:
                     os.remove(temp_path)
                 except OSError:
@@ -1517,40 +1643,33 @@ if uploaded_file is not None:
             
             # ==================== АНАЛИЗ ОБЪЕКТОВ ====================
             
-            # Собираем ВСЕ объекты один раз
             all_entities = list(msp)
             
-            # Собираем нумерованные объекты для расчёта
             objects_data: List[DXFObject] = []
             stats: Dict[str, Dict[str, Any]] = {}
             total_length = 0.0
             skipped_types = set()
             
-            # ИСПРАВЛЕНИЕ: Правильная нумерация
-            real_object_num = 0  # Номер всех объектов в файле
-            calc_object_num = 0  # Номер объектов для расчёта
+            real_object_num = 0
+            calc_object_num = 0
             
             for entity in all_entities:
                 entity_type = entity.dxftype()
                 
-                # Увеличиваем номер для ВСЕХ объектов
                 real_object_num += 1
                 
-                # Получаем информацию о слое и цвете
                 layer, color = get_layer_info(entity)
                 
-                # Проверяем, поддерживается ли тип
                 if entity_type not in calculators:
                     if entity_type not in SILENT_SKIP_TYPES:
                         skipped_types.add(entity_type)
                     continue
                 
-                # Безопасный расчёт
-                length = calc_entity_safe(
+                # ИСПРАВЛЕНИЕ: Теперь возвращаем также статус и описание
+                length, status, issue_desc = calc_entity_safe(
                     entity_type, entity, real_object_num, calculators, collector
                 )
                 
-                # Пропускаем объекты с нулевой длиной (если это не ожидаемо)
                 if length < MIN_LENGTH:
                     if entity_type not in ZERO_LENGTH_TYPES:
                         collector.add_skipped(
@@ -1559,27 +1678,27 @@ if uploaded_file is not None:
                         )
                     continue
                 
-                # Увеличиваем номер для объектов расчёта
                 calc_object_num += 1
                 
-                # Определяем центр объекта
                 center = get_entity_center(entity)
                 
-                # Создаём объект данных
+                # ИСПРАВЛЕНИЕ: Сохраняем статус и описание в объект
                 dxf_obj = DXFObject(
                     num=calc_object_num,
                     real_num=real_object_num,
                     entity_type=entity_type,
                     length=length,
                     center=center,
-                    entity=entity,  # ИСПРАВЛЕНИЕ: Сохраняем ссылку на entity!
+                    entity=entity,
                     layer=layer,
-                    color=color
+                    color=color,
+                    status=status,  # НОВОЕ
+                    original_length=length,  # НОВОЕ
+                    issue_description=issue_desc  # НОВОЕ
                 )
                 
                 objects_data.append(dxf_obj)
                 
-                # Статистика по типам
                 if entity_type not in stats:
                     stats[entity_type] = {
                         'count': 0,
@@ -1598,7 +1717,6 @@ if uploaded_file is not None:
             
             # ==================== ВЫВОД РЕЗУЛЬТАТОВ ====================
             
-            # Показываем отчёт об ошибках ПЕРВЫМ
             show_error_report(collector)
             
             if not objects_data:
@@ -1608,12 +1726,11 @@ if uploaded_file is not None:
                         f"Необрабатываемые типы: {', '.join(sorted(skipped_types))}"
                     )
             else:
-                # Результирующее сообщение
                 if collector.has_errors:
                     st.success(
                         f"✅ Обработано: **{len(objects_data)}** объектов "
-                        f"(⚠️ {len(collector.errors)} исключены из-за ошибок, "
-                        f"⚠️ {len(collector.warnings)} скорректированы)"
+                        f"(🔴 {len(collector.errors)} ошибок, "
+                        f"🟠 {len(collector.warnings)} предупреждений)"
                     )
                 else:
                     st.success(
@@ -1695,32 +1812,35 @@ if uploaded_file is not None:
                         st.info("Повторяющихся элементов не обнаружено")
                 
                 with col_right:
-                    st.markdown("### 🎨 Чертеж с маркировкой")
+                    st.markdown("### 🎨 Чертеж с цветовой индикацией")
                     
-                    control_col1, control_col2 = st.columns(2)
-                    with control_col1:
-                        show_markers = st.checkbox(
-                            "🔴 Показать маркеры",
-                            value=True
-                        )
-                    with control_col2:
+                    col_markers = st.columns(1)[0]
+                    show_markers = st.checkbox(
+                        "🔴 Показать маркеры с номерами",
+                        value=True
+                    )
+                    
+                    if show_markers:
                         font_size_multiplier = st.slider(
                             "📏 Размер шрифта маркеров",
                             min_value=0.5,
                             max_value=3.0,
                             value=1.0,
-                            step=0.1,
-                            disabled=not show_markers
+                            step=0.1
                         )
-                    
-                    if show_markers:
-                        st.caption("⬛ Черные линии | 🔴 Красные номера | Серый фон")
+                        st.caption("""
+                        📍 Маркеры показывают номера объектов  
+                        🟢 Зелёный = Нормально  
+                        🟠 Оранжевый = Предупреждение (коррекция)  
+                        🔴 Красный = Ошибка (исключён)
+                        """)
                     else:
-                        st.caption("⬛ Только чертеж без маркировки")
+                        font_size_multiplier = 1.0
+                        st.caption("⬛ Только чертеж с цветовой индикацией (без маркеров)")
                     
                     with st.spinner('Генерация визуализации...'):
-                        fig = visualize_dxf_with_numbers(
-                            doc, objects_data,
+                        fig = visualize_dxf_with_status_indicators(
+                            doc, objects_data, collector,
                             show_markers, font_size_multiplier
                         )
                         
@@ -1732,45 +1852,67 @@ if uploaded_file is not None:
                 
                 # Детальная спецификация
                 st.markdown("---")
-                st.markdown("### 📋 Детальная спецификация")
+                st.markdown("### 📋 Детальная спецификация объектов")
                 
                 detail_rows = []
                 for obj in objects_data:
+                    status_icon = "✓" if obj.status == ObjectStatus.NORMAL else \
+                                  "⚠" if obj.status == ObjectStatus.WARNING else \
+                                  "✗" if obj.status == ObjectStatus.ERROR else "—"
+                    
                     detail_rows.append({
                         '№': obj.num,
+                        'Статус': status_icon,
                         'Тип': obj.entity_type,
                         'Длина (мм)': round(obj.length, 2),
                         'X': round(obj.center[0], 2),
                         'Y': round(obj.center[1], 2),
-                        'Слой': obj.layer
+                        'Слой': obj.layer,
+                        'Описание': obj.issue_description if obj.issue_description else "—"
                     })
                 
                 df_detail = pd.DataFrame(detail_rows)
                 
+                # Фильтр по типу
                 selected_types = st.multiselect(
                     "🔍 Фильтр по типу геометрии:",
                     options=sorted(stats.keys()),
                     default=sorted(stats.keys())
                 )
                 
-                if selected_types:
-                    df_filtered = df_detail[
-                        df_detail['Тип'].isin(selected_types)
-                    ]
-                    st.dataframe(
-                        df_filtered,
-                        use_container_width=True,
-                        hide_index=True,
-                        height=400
-                    )
-                    
-                    csv = df_filtered.to_csv(index=False, encoding='utf-8-sig')
-                    st.download_button(
-                        label="📥 Скачать спецификацию (CSV)",
-                        data=csv,
-                        file_name=f"specification_{uploaded_file.name}.csv",
-                        mime="text/csv"
-                    )
+                # Фильтр по статусу
+                status_filter = st.multiselect(
+                    "📊 Фильтр по статусу:",
+                    options=["✓ Нормальные", "⚠ Предупреждения", "✗ Ошибки"],
+                    default=["✓ Нормальные", "⚠ Предупреждения", "✗ Ошибки"]
+                )
+                
+                # Применяем фильтры
+                df_filtered = df_detail[df_detail['Тип'].isin(selected_types)]
+                
+                status_map = {
+                    "✓ Нормальные": "✓",
+                    "⚠ Предупреждения": "⚠",
+                    "✗ Ошибки": "✗"
+                }
+                selected_statuses = [status_map[s] for s in status_filter]
+                df_filtered = df_filtered[df_filtered['Статус'].isin(selected_statuses)]
+                
+                st.dataframe(
+                    df_filtered,
+                    use_container_width=True,
+                    hide_index=True,
+                    height=400
+                )
+                
+                # Скачать спецификацию
+                csv = df_filtered.to_csv(index=False, encoding='utf-8-sig')
+                st.download_button(
+                    label="📥 Скачать спецификацию (CSV)",
+                    data=csv,
+                    file_name=f"specification_{uploaded_file.name}.csv",
+                    mime="text/csv"
+                )
         
         except Exception as e:
             collector.add_error(
@@ -1791,35 +1933,35 @@ else:
     
     1. **Загрузите чертеж** в формате DXF
     2. **Получите анализ** с отчётом об ошибках
-    3. **Настройте отображение** маркеров
+    3. **Посмотрите чертеж** с цветовой индикацией статуса
     4. **Экспортируйте результаты** в CSV
     
-    ### 📝 О версии v15.0:
+    ### 📝 О версии v15.1:
     
-    **КРИТИЧЕСКИЕ ИСПРАВЛЕНИЯ:**
-    - ✅ Исправлена нумерация объектов — маркеры теперь правильно привязаны
-    - ✅ Убрана утечка памяти при обработке сплайнов
-    - ✅ Исправлен расчёт булжа в полилиниях
-    - ✅ Добавлена проверка версии DXF
-    - ✅ Улучшена обработка эллипсов с проверкой ratio
+    **ВИЗУАЛИЗАЦИЯ:**
+    - ✅ Цветовая индикация статуса объектов на чертеже
+    - ✅ Объекты с ошибками выделены КРАСНЫМ
+    - ✅ Объекты с предупреждениями выделены ОРАНЖЕВЫМ
+    - ✅ Нормальные объекты ЧЁРНЫМ
+    - ✅ Пропущенные объекты СЕРЫМ
+    - ✅ Маркеры с номерами для идентификации
+    - ✅ Легенда для понимания цветов
     
-    **УЛУЧШЕНИЯ АРХИТЕКТУРЫ:**
-    - ✅ Добавлены dataclass для структурирования данных
-    - ✅ Использование Enum для уровней серьёзности ошибок
-    - ✅ Функция safe_float() для безопасного преобразования чисел
-    - ✅ Функция safe_coordinate() для безопасного извлечения координат
-    - ✅ Правильная работа с entity через сохранённые ссылки
+    **ФИЛЬТРАЦИЯ:**
+    - ✅ Фильтр спецификации по типу геометрии
+    - ✅ Фильтр по статусу объектов
+    - ✅ Описание проблем для каждого объекта
     
-    **ОПТИМИЗАЦИЯ:**
-    - ✅ Потоковая обработка сплайнов вместо загрузки в памяти
-    - ✅ Ограничение количества точек для визуализации
-    - ✅ Оптимизированная отрисовка маркеров
+    **ЭКСПОРТ:**
+    - ✅ CSV-спецификация с фильтрацией
+    - ✅ Включает координаты объектов
+    - ✅ Отображает статус и описание проблем
     """)
 
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v15.0 | Полностью исправленная версия | 
+    ✂️ CAD Analyzer Pro v15.1 | Полная визуализация статуса | 
     <a href='#' style='color: gray;'>Лицензия MIT</a>
 </div>
 """, unsafe_allow_html=True)
