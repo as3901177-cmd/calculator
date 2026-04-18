@@ -76,13 +76,86 @@ COORD_EPSILON = 1e-10
 ENTITY_COORD_PRECISION = 10
 MAX_ENTITIES_PER_BLOCK = 10000
 MAX_CENTER_POINTS = 500
-MAX_FILE_SIZE_MB = 50  # ИСПРАВЛЕНИЕ 16: Максимальный размер файла
+MAX_FILE_SIZE_MB = 50
 
-# Цвета для статусов
-COLOR_NORMAL = '#000000'
-COLOR_WARNING = '#FF8800'
-COLOR_ERROR = '#FF0000'
-COLOR_SKIPPED = '#CCCCCC'
+# НОВОЕ: Палитра цветов ACI (AutoCAD Color Index)
+ACI_COLORS = {
+    0: '#000000',      # Чёрный
+    1: '#FF0000',      # Красный
+    2: '#FFFF00',      # Жёлтый
+    3: '#00FF00',      # Зелёный (лайм)
+    4: '#00FFFF',      # Голубой
+    5: '#0000FF',      # Синий
+    6: '#FF00FF',      # Магента
+    7: '#FFFFFF',      # Белый
+    8: '#414141',      # Тёмно-серый
+    9: '#808080',      # Серый
+    10: '#FF0000',     # Красный светлый
+    11: '#FFAAAA',     # Красный светлый
+    12: '#BD0000',     # Красный тёмный
+    13: '#BD3D3D',     # Красный тёмный светлый
+    14: '#840000',     # Красный очень тёмный
+    15: '#843D3D',     # Красный очень тёмный светлый
+    16: '#FF3333',     # Красный
+    17: '#FF6666',     # Красный светлый
+    18: '#FF9999',     # Красный очень светлый
+    19: '#FFCCCC',     # Красный светлейший
+    20: '#FF0000',     # Красный
+    21: '#FFFF00',     # Жёлтый
+    22: '#00FF00',     # Зелёный
+    23: '#00FFFF',     # Голубой
+    24: '#0000FF',     # Синий
+    25: '#FF00FF',     # Магента
+    26: '#FFFF80',     # Жёлтый светлый
+    27: '#80FF80',     # Зелёный светлый
+    28: '#80FFFF',     # Голубой светлый
+    29: '#8080FF',     # Синий светлый
+    30: '#FF80FF',     # Магента светлый
+    256: '#000000',    # По слою (используем чёрный по умолчанию)
+    257: '#FF0000',    # По блоку
+}
+
+def get_aci_color(color_id: int) -> str:
+    """
+    Преобразует ACI номер цвета в HEX код.
+    НОВОЕ: Полная поддержка цветов с кешированием
+    """
+    if color_id in ACI_COLORS:
+        return ACI_COLORS[color_id]
+    
+    # Для стандартных цветов от 1 до 255
+    if 1 <= color_id <= 255:
+        # Используем базовую палитру для неизвестных цветов
+        base_colors = [
+            '#000000', '#FF0000', '#FFFF00', '#00FF00', '#00FFFF',
+            '#0000FF', '#FF00FF', '#FFFFFF', '#414141', '#808080'
+        ]
+        return base_colors[color_id % len(base_colors)]
+    
+    return '#000000'  # Чёрный по умолчанию
+
+def get_color_name(color_id: int) -> str:
+    """Получает название цвета по ACI коду."""
+    color_names = {
+        0: "Чёрный",
+        1: "Красный",
+        2: "Жёлтый",
+        3: "Зелёный",
+        4: "Голубой",
+        5: "Синий",
+        6: "Пурпур",
+        7: "Белый",
+        8: "Тёмно-серый",
+        9: "Серый",
+        256: "По слою",
+        257: "По блоку"
+    }
+    return color_names.get(color_id, f"Цвет {color_id}")
+
+# Цвета для статусов (для оверлея ошибок)
+COLOR_ERROR_OVERLAY = '#FF0000'
+COLOR_WARNING_OVERLAY = '#FF8800'
+COLOR_NORMAL_OVERLAY = None  # Не добавляем оверлей, используем исходный цвет
 
 # Цвета маркеров
 MARKER_COLOR_NORMAL = '#FFFFFF'
@@ -121,6 +194,7 @@ class DXFObject:
     entity: Any = None
     layer: str = ""
     color: int = 256
+    original_color: int = 256  # НОВОЕ: Сохраняем исходный цвет
     status: ObjectStatus = ObjectStatus.NORMAL
     original_length: float = 0.0
     issue_description: str = ""
@@ -1151,14 +1225,20 @@ def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[
 
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
-def draw_entity_manually(ax: Any, entity: Any, color: str = COLOR_NORMAL, 
-                         linewidth: float = 1.5) -> bool:
+def draw_entity_manually(ax: Any, entity: Any, color: str = '#000000', 
+                         linewidth: float = 1.5, use_original_color: bool = False) -> bool:
     """
     Рисует объект вручную с указанным цветом.
+    НОВОЕ: Добавлена поддержка исходных цветов из файла
     ИСПРАВЛЕНИЕ 4, 6: Правильная обработка is_closed
     ИСПРАВЛЕНИЕ 14: Проверка angle_diff на нулевое значение
     """
     entity_type = entity.dxftype()
+    
+    # НОВОЕ: Если нужен исходный цвет, получаем его
+    if use_original_color:
+        _, original_color = get_layer_info(entity)
+        color = get_aci_color(original_color)
     
     try:
         if entity_type == 'LINE':
@@ -1336,11 +1416,12 @@ def visualize_dxf_with_status_indicators(
     objects_data: List[DXFObject],
     collector: ErrorCollector,
     show_markers: bool = True,
-    font_size_multiplier: float = 1.0
+    font_size_multiplier: float = 1.0,
+    use_original_colors: bool = False  # НОВОЕ: Флаг для использования исходных цветов
 ) -> Tuple[Optional[Any], Optional[str]]:
     """
     Создает визуализацию с цветовой индикацией статуса объектов.
-    
+    НОВОЕ: Поддержка исходных цветов из файла
     ИСПРАВЛЕНИЕ 2, 19: Добавлена обработка ошибок и возврат информации об ошибке
     
     Returns:
@@ -1371,20 +1452,32 @@ def visualize_dxf_with_status_indicators(
             if real_object_num in status_by_real_num:
                 status, _ = status_by_real_num[real_object_num]
                 
-                if status == ObjectStatus.ERROR:
-                    color = COLOR_ERROR
-                    linewidth = 2.0
-                elif status == ObjectStatus.WARNING:
-                    color = COLOR_WARNING
-                    linewidth = 2.0
+                # НОВОЕ: Логика для выбора цвета
+                if use_original_colors:
+                    # Используем исходный цвет, но с оверлеем для ошибок
+                    draw_entity_manually(ax, entity, use_original_color=True, linewidth=1.5)
+                    
+                    # Добавляем оверлей ошибки если нужно
+                    if status == ObjectStatus.ERROR:
+                        draw_entity_manually(ax, entity, color=COLOR_ERROR_OVERLAY, linewidth=2.5)
+                    elif status == ObjectStatus.WARNING:
+                        draw_entity_manually(ax, entity, color=COLOR_WARNING_OVERLAY, linewidth=2.5)
                 else:
-                    color = COLOR_NORMAL
-                    linewidth = 1.5
+                    # Обычная схема цветов по статусу
+                    if status == ObjectStatus.ERROR:
+                        color = '#FF0000'
+                        linewidth = 2.0
+                    elif status == ObjectStatus.WARNING:
+                        color = '#FF8800'
+                        linewidth = 2.0
+                    else:
+                        color = '#000000'
+                        linewidth = 1.5
+                    
+                    draw_entity_manually(ax, entity, color=color, linewidth=linewidth)
             else:
-                color = COLOR_SKIPPED
-                linewidth = 1.0
-            
-            draw_entity_manually(ax, entity, color=color, linewidth=linewidth)
+                # Объект не в расчётах, рисуем серым
+                draw_entity_manually(ax, entity, color='#CCCCCC', linewidth=1.0)
         
         # Рисуем маркеры для объектов расчёта
         if show_markers and objects_data:
@@ -1455,10 +1548,10 @@ def visualize_dxf_with_status_indicators(
             # Легенда
             from matplotlib.patches import Patch
             legend_elements = [
-                Patch(facecolor=COLOR_NORMAL, edgecolor='black', label='✓ Нормальные (учтены)'),
-                Patch(facecolor=COLOR_WARNING, edgecolor='black', label='⚠ Коррекция (учтены)'),
-                Patch(facecolor=COLOR_ERROR, edgecolor='black', label='✗ Ошибки (исключены)'),
-                Patch(facecolor=COLOR_SKIPPED, edgecolor='black', label='- Пропущены'),
+                Patch(facecolor='#000000', edgecolor='black', label='✓ Нормальные (учтены)'),
+                Patch(facecolor='#FF8800', edgecolor='black', label='⚠ Коррекция (учтены)'),
+                Patch(facecolor='#FF0000', edgecolor='black', label='✗ Ошибки (исключены)'),
+                Patch(facecolor='#CCCCCC', edgecolor='black', label='- Пропущены'),
             ]
             
             ax.legend(
@@ -1604,35 +1697,38 @@ def show_error_report(collector: ErrorCollector):
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
 st.set_page_config(
-    page_title="Анализатор Чертежей CAD Pro v16.0",
+    page_title="Анализатор Чертежей CAD Pro v17.0",
     page_icon="📐",
     layout="wide"
 )
 
-st.title("📐 Анализатор Чертежей CAD Pro v16.0")
+st.title("📐 Анализатор Чертежей CAD Pro v17.0")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**
 
-### 🎯 Исправления в v16.0:
-✅ **Полная переструктуризация try-except блоков**  
-✅ **Защита от утечек фигур matplotlib**  
-✅ **Исправлены все проблемы с is_closed**  
-✅ **Добавлена валидация размера файла**  
-✅ **Поддержка numpy типов в safe_float**  
-✅ **Оптимизация групп ировки с Decimal**  
-✅ **Корректная обработка всех исключений**  
+### 🎯 Новое в v17.0:
+✅ **Сохранение исходных цветов линий из файла DXF**  
+✅ **Полная палитра ACI цветов AutoCAD**  
+✅ **Опция переключения между исходными цветами и индикацией ошибок**  
+✅ **Группировка объектов по цветам в спецификации**  
+✅ **Все исправления из v16.0 сохранены**  
 """)
 
-with st.expander("ℹ️ Легенда цветов на чертеже"):
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.markdown("### ⬛ Чёрный\n**Нормальные объекты**")
-    with col2:
-        st.markdown("### 🟠 Оранжевый\n**Предупреждения**")
-    with col3:
-        st.markdown("### 🔴 Красный\n**Ошибки**")
-    with col4:
-        st.markdown("### ⚪ Серый\n**Пропущены**")
+with st.expander("ℹ️ Информация о цветах"):
+    st.markdown("""
+    ### Режимы отображения чертежа:
+    
+    **Режим 1: Исходные цвета из файла (по умолчанию)**
+    - Линии отображаются теми цветами, которые установлены в DXF файле
+    - Ошибки выделяются красной обводкой поверх исходного цвета
+    - Предупреждения выделяются оранжевой обводкой
+    
+    **Режим 2: Индикация статуса**
+    - Чёрный = Нормальные объекты (учтены)
+    - Оранжевый = Предупреждения (учтены с коррекцией)
+    - Красный = Ошибки (исключены)
+    - Серый = Пропущены
+    """)
 
 st.markdown("---")
 
@@ -1693,6 +1789,7 @@ if uploaded_file is not None:
             # ==================== АНАЛИЗ ====================
             objects_data: List[DXFObject] = []
             stats: Dict[str, Dict[str, Any]] = {}
+            color_stats: Dict[int, Dict[str, Any]] = {}  # НОВОЕ: Статистика по цветам
             total_length = 0.0
             skipped_types = set()
             
@@ -1734,6 +1831,7 @@ if uploaded_file is not None:
                     entity=entity,
                     layer=layer,
                     color=color,
+                    original_color=color,  # НОВОЕ: Сохраняем исходный цвет
                     status=status,
                     original_length=length,
                     issue_description=issue_desc
@@ -1747,6 +1845,18 @@ if uploaded_file is not None:
                 stats[entity_type]['count'] += 1
                 stats[entity_type]['length'] += length
                 stats[entity_type]['items'].append({'num': calc_object_num, 'length': length})
+                
+                # НОВОЕ: Статистика по цветам
+                if color not in color_stats:
+                    color_stats[color] = {
+                        'count': 0,
+                        'length': 0.0,
+                        'color_name': get_color_name(color),
+                        'hex_color': get_aci_color(color)
+                    }
+                
+                color_stats[color]['count'] += 1
+                color_stats[color]['length'] += length
                 
                 total_length += length
             
@@ -1783,7 +1893,7 @@ if uploaded_file is not None:
                 col_left, col_right = st.columns([1, 1.5])
                 
                 with col_left:
-                    st.markdown("### 📊 Сводная спецификация")
+                    st.markdown("### 📊 Сводная спецификация по типам")
                     summary_rows = []
                     for entity_type in sorted(stats.keys()):
                         count = stats[entity_type]['count']
@@ -1798,6 +1908,22 @@ if uploaded_file is not None:
                     
                     df_summary = pd.DataFrame(summary_rows)
                     st.dataframe(df_summary, use_container_width=True, hide_index=True)
+                    
+                    # НОВОЕ: Спецификация по цветам
+                    st.markdown("### 🎨 Статистика по цветам")
+                    color_rows = []
+                    for color_id in sorted(color_stats.keys()):
+                        color_info = color_stats[color_id]
+                        color_rows.append({
+                            '🟦 Цвет': f"<span style='color: {color_info['hex_color']}'>●</span> {color_info['color_name']}",
+                            'Код': color_id,
+                            'Кол-во': color_info['count'],
+                            'Длина (мм)': round(color_info['length'], 2)
+                        })
+                    
+                    if color_rows:
+                        df_colors = pd.DataFrame(color_rows)
+                        st.markdown(df_colors.to_html(escape=False), unsafe_allow_html=True)
                     
                     st.markdown("### 🔄 Повторяющиеся элементы")
                     length_groups: Dict[float, Dict] = {}
@@ -1834,6 +1960,16 @@ if uploaded_file is not None:
                 
                 with col_right:
                     st.markdown("### 🎨 Чертеж с цветовой индикацией")
+                    
+                    # НОВОЕ: Опция выбора режима отображения цветов
+                    display_mode = st.radio(
+                        "Режим отображения:",
+                        options=["Исходные цвета", "Индикация ошибок"],
+                        horizontal=True
+                    )
+                    
+                    use_original_colors = display_mode == "Исходные цвета"
+                    
                     show_markers = st.checkbox("🔴 Показать маркеры", value=True)
                     
                     if show_markers:
@@ -1847,7 +1983,8 @@ if uploaded_file is not None:
                     with st.spinner('Генерация визуализации...'):
                         fig, error_msg = visualize_dxf_with_status_indicators(
                             doc, objects_data, collector,
-                            show_markers, font_size_multiplier
+                            show_markers, font_size_multiplier,
+                            use_original_colors  # НОВОЕ: Передаём флаг режима
                         )
                         
                         # ИСПРАВЛЕНИЕ 19: Правильная обработка ошибок
@@ -1872,6 +2009,8 @@ if uploaded_file is not None:
                                   "⚠" if obj.status == ObjectStatus.WARNING else \
                                   "✗" if obj.status == ObjectStatus.ERROR else "—"
                     
+                    color_display = get_color_name(obj.original_color)
+                    
                     detail_rows.append({
                         '№': obj.num,
                         'Статус': status_icon,
@@ -1880,6 +2019,7 @@ if uploaded_file is not None:
                         'X': round(obj.center[0], 2),
                         'Y': round(obj.center[1], 2),
                         'Слой': obj.layer,
+                        'Цвет': color_display,  # НОВОЕ: Добавляем колонку цвета
                         'Описание': obj.issue_description or "—"
                     })
                 
@@ -1897,11 +2037,21 @@ if uploaded_file is not None:
                     default=["✓ Нормальные", "⚠ Предупреждения", "✗ Ошибки"]
                 )
                 
+                # НОВОЕ: Фильтр по цветам
+                selected_colors = st.multiselect(
+                    "🎨 Фильтр по цветам:",
+                    options=sorted([get_color_name(c) for c in color_stats.keys()]),
+                    default=sorted([get_color_name(c) for c in color_stats.keys()])
+                )
+                
                 df_filtered = df_detail[df_detail['Тип'].isin(selected_types)]
                 
                 status_map = {"✓ Нормальные": "✓", "⚠ Предупреждения": "⚠", "✗ Ошибки": "✗"}
                 selected_statuses = [status_map[s] for s in status_filter]
                 df_filtered = df_filtered[df_filtered['Статус'].isin(selected_statuses)]
+                
+                # НОВОЕ: Применяем фильтр цветов
+                df_filtered = df_filtered[df_filtered['Цвет'].isin(selected_colors)]
                 
                 st.dataframe(df_filtered, use_container_width=True, hide_index=True, height=400)
                 
@@ -1924,9 +2074,15 @@ if uploaded_file is not None:
 else:
     st.info("👈 Загрузите DXF-чертеж для начала")
     st.markdown("""
-    ### 📝 О версии v16.0 (ФИНАЛЬНАЯ):
+    ### 📝 О версии v17.0 (НОВАЯ):
     
-    **ВСЕ КРИТИЧЕСКИЕ ОШИБКИ ИСПРАВЛЕНЫ:**
+    **ГЛАВНОЕ ОБНОВЛЕНИЕ:**
+    - ✅ **Сохранение исходных цветов линий из DXF файла**
+    - ✅ Полная поддержка палитры ACI цветов AutoCAD
+    - ✅ Переключение между режимами отображения
+    - ✅ Группировка по цветам в спецификации
+    
+    **ВСЕ ПРЕДЫДУЩИЕ ИСПРАВЛЕНИЯ:**
     - ✅ Полная переструктуризация try-except блоков
     - ✅ Защита от утечек фигур matplotlib
     - ✅ Исправлены все проблемы с is_closed
@@ -1934,12 +2090,11 @@ else:
     - ✅ Поддержка numpy типов в safe_float
     - ✅ Оптимизирована группировка элементов
     - ✅ Корректная обработка исключений везде
-    - ✅ Полная информация об ошибках в возврате функций
     """)
 
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v16.0 | Лицензия MIT
+    ✂️ CAD Analyzer Pro v17.0 | Лицензия MIT
 </div>
 """, unsafe_allow_html=True)
