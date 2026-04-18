@@ -1292,19 +1292,19 @@ def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[
     return (0.0, 0.0)
 
 
-# ==================== ПОДСЧЁТ ВРЕЗОК (ИСПРАВЛЕННАЯ v23) ====================
+# ==================== ПОДСЧЁТ ВРЕЗОК (ИСПРАВЛЕННАЯ v23.1) ====================
 
 def count_piercings(objects_data: List[DXFObject], collector: ErrorCollector) -> int:
     """
     Подсчитывает количество врезок (точек прожига).
     
     ПРАВИЛЬНАЯ ЛОГИКА:
-    - Каждый объект требует одну врезку ДО начала резки
-    - Врезка = точка, где лазер включается перед началом движения
+    - Врезка нужна для КАЖДОГО объекта, который будет резаться
+    - Резаться будут объекты со статусом NORMAL и WARNING
+    - Объекты с ERROR исключены (не резятся)
+    - Объекты с SKIPPED пропускаются (не обрабатывались)
     - Замкнутые контуры = врезка внутри контура
     - Открытые линии = врезка в начальной точке
-    - Объекты с ERROR исключены (не резятся)
-    - Объекты с WARNING включены (резятся с коррекцией)
     
     Returns:
         Количество врезок
@@ -1313,11 +1313,8 @@ def count_piercings(objects_data: List[DXFObject], collector: ErrorCollector) ->
     piercing_details = []
     
     for obj in objects_data:
-        # ТОЛЬКО объекты без критических ошибок могут резаться
-        if obj.status == ObjectStatus.ERROR:
-            continue  # Исключены - врезка не нужна
-        
-        # Объекты со статусом NORMAL или WARNING требуют врезку
+        # ТОЛЬКО объекты со статусом NORMAL или WARNING требуют врезку
+        # ERROR объекты исключены, SKIPPED пропускаются
         if obj.status in (ObjectStatus.NORMAL, ObjectStatus.WARNING):
             piercing_count += 1
             
@@ -1340,8 +1337,8 @@ def count_piercings(objects_data: List[DXFObject], collector: ErrorCollector) ->
         logger.info(f"Всего врезок: {piercing_count}")
         closed_count = sum(1 for p in piercing_details if p['is_closed'])
         open_count = piercing_count - closed_count
-        logger.info(f"  - Замкнутых: {closed_count}")
-        logger.info(f"  - Открытых: {open_count}")
+        logger.info(f"  - Замкнутых контуров: {closed_count}")
+        logger.info(f"  - Открытых линий: {open_count}")
     
     return piercing_count
 
@@ -1350,14 +1347,19 @@ def get_piercing_statistics(objects_data: List[DXFObject]) -> Dict[str, Any]:
     """
     Возвращает детальную статистику врезок.
     
+    ПРАВИЛЬНО: Считает только объекты со статусом NORMAL и WARNING
+    НЕПРАВИЛЬНО: Считать ERROR или SKIPPED
+    
     Returns:
         Словарь со статистикой:
         {
-            'total': int,              # Всего врезок
+            'total': int,              # Всего врезок (только NORMAL + WARNING)
             'closed': int,             # Замкнутые контуры
             'open': int,               # Открытые линии
             'by_type': {...},          # По типам объектов
-            'by_status': {...}         # По статусам
+            'by_status': {...},        # По статусам
+            'errors_excluded': int,    # Исключено из-за ошибок
+            'skipped_count': int       # Пропущено (не обработано)
         }
     """
     stats = {
@@ -1365,33 +1367,43 @@ def get_piercing_statistics(objects_data: List[DXFObject]) -> Dict[str, Any]:
         'closed': 0,
         'open': 0,
         'by_type': {},
-        'by_status': {}
+        'by_status': {},
+        'errors_excluded': 0,
+        'skipped_count': 0
     }
     
     for obj in objects_data:
-        # Пропускаем объекты с ошибками
+        # Считаем исключённые объекты
         if obj.status == ObjectStatus.ERROR:
+            stats['errors_excluded'] += 1
             continue
         
-        # Общее количество
-        stats['total'] += 1
+        # Считаем пропущённые объекты
+        if obj.status == ObjectStatus.SKIPPED:
+            stats['skipped_count'] += 1
+            continue
         
-        # По замкнутости
-        if obj.is_closed:
-            stats['closed'] += 1
-        else:
-            stats['open'] += 1
-        
-        # По типам
-        if obj.entity_type not in stats['by_type']:
-            stats['by_type'][obj.entity_type] = 0
-        stats['by_type'][obj.entity_type] += 1
-        
-        # По статусам
-        status_name = obj.status.value
-        if status_name not in stats['by_status']:
-            stats['by_status'][status_name] = 0
-        stats['by_status'][status_name] += 1
+        # ТОЛЬКО NORMAL и WARNING требуют врезки
+        if obj.status in (ObjectStatus.NORMAL, ObjectStatus.WARNING):
+            # Общее количество врезок
+            stats['total'] += 1
+            
+            # По замкнутости
+            if obj.is_closed:
+                stats['closed'] += 1
+            else:
+                stats['open'] += 1
+            
+            # По типам
+            if obj.entity_type not in stats['by_type']:
+                stats['by_type'][obj.entity_type] = 0
+            stats['by_type'][obj.entity_type] += 1
+            
+            # По статусам
+            status_name = obj.status.value
+            if status_name not in stats['by_status']:
+                stats['by_status'][status_name] = 0
+            stats['by_status'][status_name] += 1
     
     return stats
 
@@ -1871,20 +1883,21 @@ def show_error_report(collector: ErrorCollector):
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
 st.set_page_config(
-    page_title="Анализатор Чертежей CAD Pro v23.0",
+    page_title="Анализатор Чертежей CAD Pro v23.1",
     page_icon="📐",
     layout="wide"
 )
 
-st.title("📐 Анализатор Чертежей CAD Pro v23.0")
+st.title("📐 Анализатор Чертежей CAD Pro v23.1")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**
 
-### 🎯 Новое в v23.0:
-✅ **Правильный подсчёт количества врезок (прожигов)**  
+### 🎯 Новое в v23.1:
+✅ **ИСПРАВЛЕНО: Правильный подсчёт количества врезок (прожигов)**  
 ✅ **Врезка требуется для каждого обрабатываемого объекта**  
 ✅ **Объекты с ошибками исключены из врезок**  
-✅ **Детальная статистика врезок по типам**  
+✅ **Объекты с предупреждениями включены в врезки**  
+✅ **Детальная статистика врезок по типам и статусам**  
 ✅ **Все функции v22.0 сохранены**  
 """)
 
@@ -2074,19 +2087,23 @@ if uploaded_file is not None:
                 with col5:
                     st.metric("🔵 Врезок (прожигов)", f"{piercing_count}")
                 
-                # НОВОЕ: Детальная статистика врезок
-                st.markdown("### 📍 Детальная статистика врезок:")
+                # НОВОЕ: Детальная статистика врезок (ИСПРАВЛЕННАЯ)
+                st.markdown("### 📍 Статистика врезок (точек прожига):")
                 
-                col_pierce1, col_pierce2, col_pierce3 = st.columns(3)
+                col_pierce1, col_pierce2, col_pierce3, col_pierce4 = st.columns(4)
                 
                 with col_pierce1:
-                    st.metric("Всего врезок", piercing_stats['total'])
+                    st.metric("🔵 Всего врезок", piercing_stats['total'], 
+                             delta=f"из {len(objects_data)} объектов")
                 
                 with col_pierce2:
                     st.metric("🔴 Замкнутые контуры", piercing_stats['closed'])
                 
                 with col_pierce3:
                     st.metric("➡️ Открытые линии", piercing_stats['open'])
+                
+                with col_pierce4:
+                    st.metric("❌ Исключено (ошибки)", piercing_stats['errors_excluded'])
                 
                 # По типам объектов
                 if piercing_stats['by_type']:
@@ -2101,34 +2118,43 @@ if uploaded_file is not None:
                     df_types = pd.DataFrame(type_rows)
                     st.dataframe(df_types, use_container_width=True, hide_index=True)
                 
-                # По статусам
+                # По статусам (должно быть только NORMAL и WARNING для врезок)
                 if piercing_stats['by_status']:
-                    st.markdown("**Врезки по статусам:**")
+                    st.markdown("**Врезки по статусам обработки:**")
                     status_rows = []
                     for status_name in sorted(piercing_stats['by_status'].keys()):
                         count = piercing_stats['by_status'][status_name]
+                        # Красивый вывод статусов
+                        if "normal" in status_name.lower():
+                            emoji = "✓"
+                        else:
+                            emoji = "⚠"
                         status_rows.append({
-                            'Статус': status_name,
+                            'Статус': f"{emoji} {status_name}",
                             'Врезок': count
                         })
                     df_status = pd.DataFrame(status_rows)
                     st.dataframe(df_status, use_container_width=True, hide_index=True)
                 
-                # Общая информация
+                # Общая информация (ИСПРАВЛЕННАЯ)
                 st.markdown(f"""
-                **📊 Сводная информация:**
-                - Всего объектов обработано: {len(objects_data)}
-                - Объектов с ошибками (исключены): {len(collector.errors)}
-                - **Врезок (точек прожига): {piercing_count}**
-                  - Замкнутые контуры: {piercing_stats['closed']}
-                  - Открытые линии: {piercing_stats['open']}
-                - Объектов с предупреждениями: {len(collector.warnings)}
+                **📊 ИТОГОВАЯ ИНФОРМАЦИЯ:**
                 
-                **⚙️ Как это работает:**
-                - Каждая врезка = одна точка прожига лазера
-                - Врезка делается ДО начала резки (на малой мощности)
-                - Замкнутые контуры: врезка обычно внутри контура
-                - Открытые линии: врезка в начальной точке
+                | Параметр | Значение |
+                |----------|----------|
+                | Всего объектов в чертеже | {real_object_num} |
+                | Обработано объектов | {len(objects_data)} |
+                | Объектов с ошибками (исключены) | {len(collector.errors)} |
+                | Объектов с предупреждениями | {len(collector.warnings)} |
+                | **Врезок (точек прожига)** | **{piercing_count}** |
+                | - Замкнутые контуры | {piercing_stats['closed']} |
+                | - Открытые линии | {piercing_stats['open']} |
+                
+                **⚙️ Расшифровка:**
+                - **Врезки** = точки, где лазер включается для прожига
+                - **Замкнутые** = контуры, врезка внутри
+                - **Открытые** = линии, врезка в начале
+                - **Исключены** = объекты с ошибками, не войдут в резку
                 """)
                 
                 st.markdown("---")
@@ -2229,15 +2255,14 @@ if uploaded_file is not None:
 else:
     st.info("👈 Загрузите DXF-чертеж для начала")
     st.markdown("""
-    ### 📝 О версии v23.0 (НОВАЯ):
+    ### 📝 О версии v23.1 (ИСПРАВЛЕННАЯ):
     
-    **ГЛАВНОЕ ОБНОВЛЕНИЕ:**
+    **ГЛАВНОЕ ИСПРАВЛЕНИЕ:**
     - ✅ **Правильный подсчёт количества врезок**
-    - ✅ Врезка требуется для каждого обрабатываемого объекта
-    - ✅ Объекты с ошибками (ERROR) исключены из врезок
-    - ✅ Объекты с предупреждениями (WARNING) требуют врезку
-    - ✅ Показ количества врезок в метриках
-    - ✅ Детальная статистика врезок:
+    - ✅ Врезка считается только для объектов со статусом NORMAL и WARNING
+    - ✅ Объекты с ERROR исключены из врезок
+    - ✅ Объекты с SKIPPED не влияют на подсчёт
+    - ✅ Правильная статистика:
       - По типам объектов (LINE, CIRCLE, ARC и т.д.)
       - По статусам (NORMAL, WARNING)
       - По замкнутости (замкнутые vs открытые)
@@ -2257,6 +2282,6 @@ else:
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v23.0 | Лицензия MIT
+    ✂️ CAD Analyzer Pro v23.1 | Лицензия MIT | ИСПРАВЛЕНА ЛОГИКА ВРЕЗОК
 </div>
 """, unsafe_allow_html=True)
