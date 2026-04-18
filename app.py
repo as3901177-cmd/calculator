@@ -1924,39 +1924,6 @@ if uploaded_file is not None:
                     if color_rows:
                         df_colors = pd.DataFrame(color_rows)
                         st.markdown(df_colors.to_html(escape=False), unsafe_allow_html=True)
-                    
-                    st.markdown("### 🔄 Повторяющиеся элементы")
-                    length_groups: Dict[float, Dict] = {}
-                    
-                    # ИСПРАВЛЕНИЕ 18: Оптимизированная группировка
-                    for obj in objects_data:
-                        # Оптимизация: группируем прямо без Decimal если не нужна точность
-                        key = round(obj.length, 1)
-                        if key not in length_groups:
-                            length_groups[key] = {
-                                'type': obj.entity_type,
-                                'nums': [],
-                                'length': obj.length
-                            }
-                        length_groups[key]['nums'].append(obj.num)
-                    
-                    group_rows = []
-                    for key in sorted(length_groups.keys(), reverse=True):
-                        group = length_groups[key]
-                        count = len(group['nums'])
-                        if count > 1:
-                            group_rows.append({
-                                'Тип': group['type'],
-                                'Размер': f"{group['length']:.2f} мм",
-                                'Кол-во': count,
-                                'Итого': f"{group['length']*count:.2f} мм"
-                            })
-                    
-                    if group_rows:
-                        df_groups = pd.DataFrame(group_rows)
-                        st.dataframe(df_groups, use_container_width=True, hide_index=True)
-                    else:
-                        st.info("Повторяющихся элементов не обнаружено")
                 
                 with col_right:
                     st.markdown("### 🎨 Чертеж с цветовой индикацией")
@@ -2024,7 +1991,6 @@ else:
     - ✅ Исправлены все проблемы с is_closed
     - ✅ Добавлена валидация размера файла (макс. 50 МБ)
     - ✅ Поддержка numpy типов в safe_float
-    - ✅ Оптимизирована группировка элементов
     - ✅ Корректная обработка исключений везде
     """)
 
