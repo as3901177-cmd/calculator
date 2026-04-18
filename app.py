@@ -198,6 +198,7 @@ class DXFObject:
     status: ObjectStatus = ObjectStatus.NORMAL
     original_length: float = 0.0
     issue_description: str = ""
+    is_closed: bool = False  # НОВОЕ v23: Флаг замкнутости
 
 
 # ==================== DATACLASS ДЛЯ ОШИБКИ ====================
@@ -422,6 +423,75 @@ def get_layer_info(entity: Any) -> Tuple[str, int]:
         return layer, color
     except (AttributeError, ValueError, TypeError):
         return "0", 256
+
+
+# НОВОЕ v23: Функция проверки замкнутости
+def check_is_closed(entity: Any) -> bool:
+    """
+    Проверяет, является ли объект замкнутым.
+    
+    Returns:
+        True если объект замкнут, False иначе
+    """
+    entity_type = entity.dxftype()
+    
+    try:
+        # CIRCLE всегда замкнут
+        if entity_type == 'CIRCLE':
+            return True
+        
+        # ELLIPSE замкнут если полный (угол 2π)
+        if entity_type == 'ELLIPSE':
+            start_param = safe_float(entity.dxf.start_param)
+            end_param = safe_float(entity.dxf.end_param)
+            if start_param is not None and end_param is not None:
+                angle_span = end_param - start_param
+                while angle_span < 0:
+                    angle_span += 2 * math.pi
+                # Проверяем полный оборот
+                return abs(angle_span - 2 * math.pi) < 0.01
+            return False
+        
+        # LWPOLYLINE
+        if entity_type == 'LWPOLYLINE':
+            return entity.close if hasattr(entity, 'close') else bool(entity.dxf.flags & 1)
+        
+        # POLYLINE
+        if entity_type == 'POLYLINE':
+            if hasattr(entity, 'is_closed'):
+                return entity.is_closed
+            else:
+                return bool(entity.dxf.flags & 0x01)
+        
+        # SPLINE - проверяем совпадение первой и последней точек
+        if entity_type == 'SPLINE':
+            try:
+                points = []
+                for i, pt in enumerate(entity.flattening(0.1)):
+                    if i >= 2:  # Берём только первую и последнюю
+                        points.append((safe_float(pt[0]), safe_float(pt[1])))
+                        if i >= MAX_CENTER_POINTS:
+                            break
+                    elif i == 0:
+                        points.append((safe_float(pt[0]), safe_float(pt[1])))
+                
+                if len(points) >= 2:
+                    first = points[0]
+                    last = points[-1]
+                    if first[0] is not None and first[1] is not None and \
+                       last[0] is not None and last[1] is not None:
+                        dist = math.hypot(last[0] - first[0], last[1] - first[1])
+                        return dist < COORD_EPSILON
+            except:
+                pass
+            return False
+        
+        # LINE и ARC не замкнуты
+        return False
+    
+    except Exception as e:
+        logger.debug(f"Ошибка проверки замкнутости для {entity_type}: {e}")
+        return False
 
 
 # ==================== ВАЛИДАЦИЯ РЕЗУЛЬТАТОВ ====================
@@ -1699,19 +1769,19 @@ def show_error_report(collector: ErrorCollector):
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
 st.set_page_config(
-    page_title="Анализатор Чертежей CAD Pro v22.0",
+    page_title="Анализатор Чертежей CAD Pro v23.0",
     page_icon="📐",
     layout="wide"
 )
 
-st.title("📐 Анализатор Чертежей CAD Pro v22.0")
+st.title("📐 Анализатор Чертежей CAD Pro v23.0")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**
 
-### 🎯 Новое в v22.0:
-✅ **Легенда отображается ТОЛЬКО в режиме "Индикация ошибок"**  
-✅ **Чертёж не загораживается легендой в режиме "Исходные цвета"**  
-✅ **Все функции предыдущих версий сохранены**  
+### 🎯 Новое в v23.0:
+✅ **Подсчёт количества врезок** (замкнутых контуров)  
+✅ **Автоматическое определение замкнутых линий**  
+✅ **Все функции v22.0 сохранены**  
 """)
 
 with st.expander("ℹ️ Информация о цветах"):
@@ -1791,9 +1861,10 @@ if uploaded_file is not None:
             # ==================== АНАЛИЗ ====================
             objects_data: List[DXFObject] = []
             stats: Dict[str, Dict[str, Any]] = {}
-            color_stats: Dict[int, Dict[str, Any]] = {}  # НОВОЕ: Статистика по цветам
+            color_stats: Dict[int, Dict[str, Any]] = {}
             total_length = 0.0
             skipped_types = set()
+            piercing_count = 0  # НОВОЕ v23: Счётчик врезок
             
             real_object_num = 0
             calc_object_num = 0
@@ -1824,6 +1895,11 @@ if uploaded_file is not None:
                 calc_object_num += 1
                 center = get_entity_center(entity)
                 
+                # НОВОЕ v23: Проверяем замкнутость
+                is_closed = check_is_closed(entity)
+                if is_closed:
+                    piercing_count += 1
+                
                 dxf_obj = DXFObject(
                     num=calc_object_num,
                     real_num=real_object_num,
@@ -1833,10 +1909,11 @@ if uploaded_file is not None:
                     entity=entity,
                     layer=layer,
                     color=color,
-                    original_color=color,  # НОВОЕ: Сохраняем исходный цвет
+                    original_color=color,
                     status=status,
                     original_length=length,
-                    issue_description=issue_desc
+                    issue_description=issue_desc,
+                    is_closed=is_closed  # НОВОЕ v23
                 )
                 
                 objects_data.append(dxf_obj)
@@ -1848,7 +1925,7 @@ if uploaded_file is not None:
                 stats[entity_type]['length'] += length
                 stats[entity_type]['items'].append({'num': calc_object_num, 'length': length})
                 
-                # НОВОЕ: Статистика по цветам
+                # Статистика по цветам
                 if color not in color_stats:
                     color_stats[color] = {
                         'count': 0,
@@ -1878,9 +1955,9 @@ if uploaded_file is not None:
                 else:
                     st.success(f"✅ Обработано: **{len(objects_data)}** объектов")
                 
-                # Метрики
+                # НОВОЕ v23: Метрики с врезками
                 st.markdown("### 📏 Итоговая длина реза:")
-                col1, col2, col3, col4 = st.columns(4)
+                col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
                     st.metric("Миллиметры", f"{total_length:.2f}")
                 with col2:
@@ -1889,6 +1966,8 @@ if uploaded_file is not None:
                     st.metric("Метры", f"{total_length/1000:.4f}")
                 with col4:
                     st.metric("Объектов", f"{len(objects_data)}")
+                with col5:
+                    st.metric("🔵 Врезок", f"{piercing_count}")  # НОВОЕ v23
                 
                 st.markdown("---")
                 
@@ -1911,7 +1990,7 @@ if uploaded_file is not None:
                     df_summary = pd.DataFrame(summary_rows)
                     st.dataframe(df_summary, use_container_width=True, hide_index=True)
                     
-                    # НОВОЕ: Спецификация по цветам
+                    # Спецификация по цветам
                     st.markdown("### 🎨 Статистика по цветам")
                     color_rows = []
                     for color_id in sorted(color_stats.keys()):
@@ -1930,7 +2009,7 @@ if uploaded_file is not None:
                 with col_right:
                     st.markdown("### 🎨 Чертеж с цветовой индикацией")
                     
-                    # НОВОЕ: Опция выбора режима отображения цветов
+                    # Опция выбора режима отображения цветов
                     col_radio, col_legend = st.columns([1, 1])
                     
                     with col_radio:
@@ -1940,7 +2019,7 @@ if uploaded_file is not None:
                             horizontal=True
                         )
                     
-                    # НОВОЕ v22: Показываем легенду ТОЛЬКО в режиме индикации
+                    # Показываем легенду ТОЛЬКО в режиме индикации
                     with col_legend:
                         if display_mode == "Индикация ошибок":
                             st.markdown("**Легенда:**")
@@ -1965,7 +2044,7 @@ if uploaded_file is not None:
                         fig, error_msg = visualize_dxf_with_status_indicators(
                             doc, objects_data, collector,
                             show_markers, font_size_multiplier,
-                            use_original_colors  # НОВОЕ: Передаём флаг режима
+                            use_original_colors
                         )
                         
                         # ИСПРАВЛЕНИЕ 19: Правильная обработка ошибок
@@ -1991,29 +2070,28 @@ if uploaded_file is not None:
 else:
     st.info("👈 Загрузите DXF-чертеж для начала")
     st.markdown("""
-    ### 📝 О версии v22.0 (НОВАЯ):
+    ### 📝 О версии v23.0 (НОВАЯ):
     
     **ГЛАВНОЕ ОБНОВЛЕНИЕ:**
-    - ✅ **Легенда отображается ТОЛЬКО в режиме "Индикация ошибок"**
-    - ✅ **Компактная легенда рядом с переключателем режима**
-    - ✅ **Чистый чертёж в режиме "Исходные цвета"**
+    - ✅ **Подсчёт количества врезок** (замкнутых контуров)
+    - ✅ Автоматическое определение замкнутых линий всех типов
+    - ✅ Показ количества врезок в метриках
+    
+    **ВСЕ ФУНКЦИИ v22.0:**
+    - ✅ Легенда отображается ТОЛЬКО в режиме "Индикация ошибок"
+    - ✅ Компактная легенда рядом с переключателем режима
+    - ✅ Чистый чертёж в режиме "Исходные цвета"
     
     **ВСЕ ФУНКЦИИ v17.0:**
     - ✅ Сохранение исходных цветов линий из DXF файла
     - ✅ Полная поддержка палитры ACI цветов AutoCAD
     - ✅ Переключение между режимами отображения
     - ✅ Группировка по цветам в спецификации
-    
-    **ВСЕ ИСПРАВЛЕНИЯ v16.0:**
-    - ✅ Полная переструктуризация try-except блоков
-    - ✅ Защита от утечек фигур matplotlib
-    - ✅ Исправлены все проблемы с is_closed
-    - ✅ Корректная обработка исключений везде
     """)
 
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v22.0 | Лицензия MIT
+    ✂️ CAD Analyzer Pro v23.0 | Лицензия MIT
 </div>
 """, unsafe_allow_html=True)
