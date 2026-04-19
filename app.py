@@ -17,6 +17,7 @@ from functools import lru_cache
 from typing import Tuple, Optional, Dict, List, Any, Set
 from dataclasses import dataclass, field
 from enum import Enum
+from collections import defaultdict
 
 # ИСПРАВЛЕНИЕ 10: Импорт Decimal с fallback для старых версий Python
 try:
@@ -77,6 +78,9 @@ ENTITY_COORD_PRECISION = 10
 MAX_ENTITIES_PER_BLOCK = 10000
 MAX_CENTER_POINTS = 500
 MAX_FILE_SIZE_MB = 50
+
+# Константа для определения связности контуров
+PIERCING_TOLERANCE = 0.1  # мм - точки ближе считаются соединёнными
 
 # Палитра цветов ACI (AutoCAD Color Index)
 ACI_COLORS = {
@@ -199,6 +203,7 @@ class DXFObject:
     original_length: float = 0.0
     issue_description: str = ""
     is_closed: bool = False
+    chain_id: int = -1  # НОВОЕ: ID цепи (для группировки связанных объектов)
 
 
 # ==================== DATACLASS ДЛЯ ОШИБКИ ====================
@@ -1292,120 +1297,428 @@ def get_entity_center_with_offset(entity: Any, offset_distance: float) -> Tuple[
     return (0.0, 0.0)
 
 
-# ==================== ПОДСЧЁТ ВРЕЗОК (ИСПРАВЛЕННАЯ v23.1) ====================
+# ==================== ПОЛУЧЕНИЕ КОНЦОВ ОБЪЕКТА (НОВОЕ) ====================
 
-def count_piercings(objects_data: List[DXFObject], collector: ErrorCollector) -> int:
+def get_entity_endpoints(entity: Any) -> Tuple[Optional[Tuple[float, float]], Optional[Tuple[float, float]]]:
     """
-    Подсчитывает количество врезок (точек прожига).
-    
-    ПРАВИЛЬНАЯ ЛОГИКА:
-    - Врезка нужна для КАЖДОГО объекта, который будет резаться
-    - Резаться будут объекты со статусом NORMAL и WARNING
-    - Объекты с ERROR исключены (не резятся)
-    - Объекты с SKIPPED пропускаются (не обрабатывались)
-    - Замкнутые контуры = врезка внутри контура
-    - Открытые линии = врезка в начальной точке
+    Извлекает начальную и конечную точки объекта.
     
     Returns:
-        Количество врезок
+        Tuple (start_point, end_point) где каждая точка это (x, y) или None
     """
-    piercing_count = 0
-    piercing_details = []
+    entity_type = entity.dxftype()
     
-    for obj in objects_data:
-        # ТОЛЬКО объекты со статусом NORMAL или WARNING требуют врезку
-        # ERROR объекты исключены, SKIPPED пропускаются
-        if obj.status in (ObjectStatus.NORMAL, ObjectStatus.WARNING):
-            piercing_count += 1
+    try:
+        if entity_type == 'LINE':
+            start = entity.dxf.start
+            end = entity.dxf.end
             
-            # Логирование типа врезки
-            piercing_type = "замкнутая" if obj.is_closed else "открытая"
-            status_str = "нормально" if obj.status == ObjectStatus.NORMAL else "с коррекцией"
+            x1, y1 = safe_coordinate(start)
+            x2, y2 = safe_coordinate(end)
             
-            piercing_details.append({
-                'num': obj.num,
-                'type': obj.entity_type,
-                'piercing_type': piercing_type,
-                'status': status_str,
-                'length': obj.length,
-                'is_closed': obj.is_closed
+            if None in (x1, y1, x2, y2):
+                return None, None
+            
+            return (x1, y1), (x2, y2)
+        
+        elif entity_type == 'ARC':
+            center = entity.dxf.center
+            radius = safe_float(entity.dxf.radius)
+            start_angle = safe_float(entity.dxf.start_angle)
+            end_angle = safe_float(entity.dxf.end_angle)
+            
+            cx, cy = safe_coordinate(center)
+            
+            if any(v is None for v in (cx, cy, radius, start_angle, end_angle)):
+                return None, None
+            
+            start_rad = math.radians(start_angle)
+            end_rad = math.radians(end_angle)
+            
+            start_point = (
+                cx + radius * math.cos(start_rad),
+                cy + radius * math.sin(start_rad)
+            )
+            end_point = (
+                cx + radius * math.cos(end_rad),
+                cy + radius * math.sin(end_rad)
+            )
+            
+            return start_point, end_point
+        
+        elif entity_type in ('LWPOLYLINE', 'POLYLINE'):
+            try:
+                if entity_type == 'LWPOLYLINE':
+                    with entity.points('xy') as pts:
+                        points = [(safe_float(p[0]), safe_float(p[1])) for p in pts]
+                else:
+                    points = [(safe_float(p[0]), safe_float(p[1])) for p in entity.points()]
+                
+                points = [(x, y) for x, y in points if x is not None and y is not None]
+                
+                if len(points) >= 2:
+                    return points[0], points[-1]
+            except (AttributeError, TypeError, ValueError):
+                pass
+        
+        elif entity_type == 'SPLINE':
+            try:
+                points = []
+                for i, pt in enumerate(entity.flattening(0.1)):
+                    if i >= MAX_CENTER_POINTS:
+                        break
+                    x, y = safe_float(pt[0]), safe_float(pt[1])
+                    if x is not None and y is not None:
+                        points.append((x, y))
+                
+                if len(points) >= 2:
+                    return points[0], points[-1]
+            except (AttributeError, TypeError, ValueError):
+                pass
+        
+        # Замкнутые объекты не имеют концов
+        elif entity_type in ('CIRCLE', 'ELLIPSE'):
+            return None, None
+    
+    except Exception as e:
+        logger.debug(f"Ошибка извлечения концов {entity_type}: {e}")
+    
+    return None, None
+
+
+# ==================== ПРОВЕРКА БЛИЗОСТИ ТОЧЕК (НОВОЕ) ====================
+
+def points_close(p1: Tuple[float, float], p2: Tuple[float, float], tolerance: float) -> bool:
+    """
+    Проверяет близость двух точек.
+    
+    Args:
+        p1: Первая точка (x, y)
+        p2: Вторая точка (x, y)
+        tolerance: Максимальное расстояние для считания точек "одинаковыми"
+    
+    Returns:
+        True если точки ближе чем tolerance
+    """
+    try:
+        dx = p1[0] - p2[0]
+        dy = p1[1] - p2[1]
+        distance = math.hypot(dx, dy)
+        return distance < tolerance
+    except (TypeError, IndexError):
+        return False
+
+
+# ==================== ПОИСК СВЯЗАННЫХ КОНТУРОВ (НОВОЕ) ====================
+
+def find_connected_chain(start_idx: int, objects: List[DXFObject], 
+                        tolerance: float) -> Set[int]:
+    """
+    Находит все объекты, связанные в одну цепь через граф смежности.
+    
+    Алгоритм BFS (поиск в ширину):
+    1. Начинаем с объекта start_idx
+    2. Проверяем близость его концов к концам всех других объектов
+    3. Если найдено соединение - добавляем в цепь и продолжаем от него
+    4. Возвращаем множество индексов всех связанных объектов
+    
+    Args:
+        start_idx: Индекс начального объекта
+        objects: Список всех объектов
+        tolerance: Допуск на расстояние между точками
+    
+    Returns:
+        Множество индексов объектов, образующих связанную цепь
+    """
+    chain = {start_idx}
+    queue = [start_idx]
+    
+    # Кэшируем концы всех объектов для быстродействия
+    endpoints_cache = {}
+    for idx, obj in enumerate(objects):
+        if obj.entity is not None:
+            endpoints_cache[idx] = get_entity_endpoints(obj.entity)
+    
+    while queue:
+        current_idx = queue.pop(0)
+        
+        # Получаем концы текущего объекта
+        current_endpoints = endpoints_cache.get(current_idx, (None, None))
+        start_pt, end_pt = current_endpoints
+        
+        if start_pt is None or end_pt is None:
+            continue
+        
+        # Ищем соседние объекты
+        for idx, obj in enumerate(objects):
+            # Пропускаем уже обработанные
+            if idx in chain:
+                continue
+            
+            # Пропускаем объекты с ошибками
+            if obj.status not in (ObjectStatus.NORMAL, ObjectStatus.WARNING):
+                continue
+            
+            # Получаем концы соседнего объекта
+            neighbor_endpoints = endpoints_cache.get(idx, (None, None))
+            neighbor_start, neighbor_end = neighbor_endpoints
+            
+            if neighbor_start is None or neighbor_end is None:
+                continue
+            
+            # Проверяем все возможные комбинации соединений
+            connections = [
+                points_close(end_pt, neighbor_start, tolerance),      # конец → начало
+                points_close(end_pt, neighbor_end, tolerance),        # конец → конец
+                points_close(start_pt, neighbor_start, tolerance),    # начало → начало
+                points_close(start_pt, neighbor_end, tolerance)       # начало → конец
+            ]
+            
+            # Если хотя бы одна комбинация подходит - объекты связаны
+            if any(connections):
+                chain.add(idx)
+                queue.append(idx)
+    
+    return chain
+
+
+# ==================== ПОДСЧЁТ ВРЕЗОК С АНАЛИЗОМ СВЯЗНОСТИ (НОВОЕ v24.0) ====================
+
+def count_piercings_advanced(objects_data: List[DXFObject], 
+                             collector: ErrorCollector,
+                             tolerance: float = PIERCING_TOLERANCE) -> Tuple[int, Dict[str, Any]]:
+    """
+    ПРАВИЛЬНЫЙ подсчёт врезок с анализом связности контуров.
+    
+    Алгоритм:
+    1. Фильтруем только валидные объекты (NORMAL и WARNING)
+    2. Замкнутые объекты (CIRCLE, ELLIPSE, замкнутые полилинии) = изолированные цепи
+    3. Для открытых объектов строим граф связности по близости концов
+    4. Каждая связанная цепь = 1 врезка
+    
+    Args:
+        objects_data: Список всех обработанных объектов
+        collector: Коллектор ошибок для логирования
+        tolerance: Допуск на расстояние для считания точек соединёнными (мм)
+    
+    Returns:
+        Tuple (количество_врезок, детальная_статистика)
+    """
+    # Фильтруем только валидные объекты
+    valid_objects = [
+        obj for obj in objects_data 
+        if obj.status in (ObjectStatus.NORMAL, ObjectStatus.WARNING)
+    ]
+    
+    if not valid_objects:
+        return 0, {
+            'total': 0,
+            'closed_objects': 0,
+            'open_chains': 0,
+            'isolated_objects': 0,
+            'chains': []
+        }
+    
+    visited = set()
+    chain_count = 0
+    chains_details = []
+    
+    closed_count = 0
+    open_chains_count = 0
+    isolated_count = 0
+    
+    # Обрабатываем каждый объект
+    for idx, obj in enumerate(valid_objects):
+        if idx in visited:
+            continue
+        
+        entity_type = obj.entity.dxftype() if obj.entity else "UNKNOWN"
+        
+        # Замкнутые объекты - отдельные цепи (1 врезка каждый)
+        if obj.is_closed or entity_type in ('CIRCLE', 'ELLIPSE'):
+            chain_count += 1
+            closed_count += 1
+            visited.add(idx)
+            
+            chains_details.append({
+                'chain_id': chain_count,
+                'type': 'closed',
+                'objects_count': 1,
+                'objects': [obj.num],
+                'entity_types': [entity_type],
+                'total_length': obj.length,
+                'is_closed': True
             })
+            
+            # Присваиваем ID цепи объекту
+            obj.chain_id = chain_count
+            
+            logger.debug(f"Цепь #{chain_count}: Замкнутый {entity_type} (объект #{obj.num})")
+            continue
+        
+        # Открытые объекты - ищем связанные
+        chain = find_connected_chain(idx, valid_objects, tolerance)
+        
+        if len(chain) == 1:
+            # Изолированный объект
+            isolated_count += 1
+        else:
+            # Группа связанных объектов
+            open_chains_count += 1
+        
+        visited.update(chain)
+        chain_count += 1
+        
+        # Собираем детали цепи
+        chain_objects = [valid_objects[i] for i in chain]
+        chain_length = sum(obj.length for obj in chain_objects)
+        chain_entity_types = [obj.entity.dxftype() if obj.entity else "UNKNOWN" 
+                             for obj in chain_objects]
+        
+        chains_details.append({
+            'chain_id': chain_count,
+            'type': 'open' if len(chain) > 1 else 'isolated',
+            'objects_count': len(chain),
+            'objects': [obj.num for obj in chain_objects],
+            'entity_types': chain_entity_types,
+            'total_length': chain_length,
+            'is_closed': False
+        })
+        
+        # Присваиваем ID цепи всем объектам в цепи
+        for i in chain:
+            valid_objects[i].chain_id = chain_count
+        
+        logger.debug(
+            f"Цепь #{chain_count}: {len(chain)} объектов "
+            f"({', '.join(chain_entity_types)}), "
+            f"длина {chain_length:.2f} мм"
+        )
     
-    # Логирование деталей врезок
-    if piercing_details:
-        logger.info(f"=== АНАЛИЗ ВРЕЗОК ===")
-        logger.info(f"Всего врезок: {piercing_count}")
-        closed_count = sum(1 for p in piercing_details if p['is_closed'])
-        open_count = piercing_count - closed_count
-        logger.info(f"  - Замкнутых контуров: {closed_count}")
-        logger.info(f"  - Открытых линий: {open_count}")
+    # Формируем детальную статистику
+    statistics = {
+        'total': chain_count,
+        'closed_objects': closed_count,
+        'open_chains': open_chains_count,
+        'isolated_objects': isolated_count,
+        'chains': chains_details,
+        'tolerance_used': tolerance,
+        'total_objects_analyzed': len(valid_objects),
+        'total_objects_in_file': len(objects_data)
+    }
     
-    return piercing_count
+    # Логируем результат
+    collector.add_info(
+        'PIERCING', 0,
+        f"Анализ связности: найдено {chain_count} цепей "
+        f"({closed_count} замкнутых, {open_chains_count} групп, "
+        f"{isolated_count} изолированных) "
+        f"при допуске {tolerance} мм"
+    )
+    
+    return chain_count, statistics
 
 
 def get_piercing_statistics(objects_data: List[DXFObject]) -> Dict[str, Any]:
     """
     Возвращает детальную статистику врезок.
-    
-    ПРАВИЛЬНО: Считает только объекты со статусом NORMAL и WARNING
-    НЕПРАВИЛЬНО: Считать ERROR или SKIPPED
+    ОБНОВЛЕНО: использует chain_id из анализа связности
     
     Returns:
         Словарь со статистикой:
         {
-            'total': int,              # Всего врезок (только NORMAL + WARNING)
+            'total': int,              # Всего врезок (уникальных цепей)
             'closed': int,             # Замкнутые контуры
-            'open': int,               # Открытые линии
+            'open': int,               # Открытые цепи
+            'isolated': int,           # Изолированные объекты
             'by_type': {...},          # По типам объектов
             'by_status': {...},        # По статусам
             'errors_excluded': int,    # Исключено из-за ошибок
-            'skipped_count': int       # Пропущено (не обработано)
+            'skipped_count': int,      # Пропущено (не обработано)
+            'chains': [...]            # Информация о цепях
         }
     """
-    stats = {
-        'total': 0,
-        'closed': 0,
-        'open': 0,
-        'by_type': {},
-        'by_status': {},
-        'errors_excluded': 0,
-        'skipped_count': 0
-    }
+    # Подсчитываем уникальные chain_id
+    unique_chains = set()
+    closed_chains = set()
+    open_chains = set()
+    isolated_chains = set()
+    
+    errors_excluded = 0
+    skipped_count = 0
+    
+    by_type = defaultdict(int)
+    by_status = defaultdict(int)
+    
+    chains_info = defaultdict(lambda: {
+        'objects': [],
+        'types': set(),
+        'statuses': set(),
+        'is_closed': False,
+        'total_length': 0.0
+    })
     
     for obj in objects_data:
         # Считаем исключённые объекты
         if obj.status == ObjectStatus.ERROR:
-            stats['errors_excluded'] += 1
+            errors_excluded += 1
             continue
         
         # Считаем пропущённые объекты
         if obj.status == ObjectStatus.SKIPPED:
-            stats['skipped_count'] += 1
+            skipped_count += 1
             continue
         
-        # ТОЛЬКО NORMAL и WARNING требуют врезки
+        # ТОЛЬКО NORMAL и WARNING учитываются
         if obj.status in (ObjectStatus.NORMAL, ObjectStatus.WARNING):
-            # Общее количество врезок
-            stats['total'] += 1
+            # Если объект в цепи
+            if obj.chain_id > 0:
+                unique_chains.add(obj.chain_id)
+                
+                # Собираем информацию о цепи
+                chains_info[obj.chain_id]['objects'].append(obj.num)
+                chains_info[obj.chain_id]['types'].add(obj.entity_type)
+                chains_info[obj.chain_id]['statuses'].add(obj.status.value)
+                chains_info[obj.chain_id]['is_closed'] = obj.is_closed
+                chains_info[obj.chain_id]['total_length'] += obj.length
+                
+                # Определяем тип цепи
+                if obj.is_closed:
+                    closed_chains.add(obj.chain_id)
+                elif len(chains_info[obj.chain_id]['objects']) == 1:
+                    isolated_chains.add(obj.chain_id)
+                else:
+                    open_chains.add(obj.chain_id)
             
-            # По замкнутости
-            if obj.is_closed:
-                stats['closed'] += 1
-            else:
-                stats['open'] += 1
-            
-            # По типам
-            if obj.entity_type not in stats['by_type']:
-                stats['by_type'][obj.entity_type] = 0
-            stats['by_type'][obj.entity_type] += 1
-            
-            # По статусам
-            status_name = obj.status.value
-            if status_name not in stats['by_status']:
-                stats['by_status'][status_name] = 0
-            stats['by_status'][status_name] += 1
+            # Статистика по типам и статусам
+            by_type[obj.entity_type] += 1
+            by_status[obj.status.value] += 1
     
-    return stats
+    # Формируем список цепей
+    chains_list = []
+    for chain_id in sorted(unique_chains):
+        info = chains_info[chain_id]
+        chains_list.append({
+            'chain_id': chain_id,
+            'objects_count': len(info['objects']),
+            'objects': info['objects'],
+            'types': list(info['types']),
+            'statuses': list(info['statuses']),
+            'is_closed': info['is_closed'],
+            'total_length': info['total_length']
+        })
+    
+    return {
+        'total': len(unique_chains),
+        'closed': len(closed_chains),
+        'open': len(open_chains) - len(isolated_chains),
+        'isolated': len(isolated_chains),
+        'by_type': dict(by_type),
+        'by_status': dict(by_status),
+        'errors_excluded': errors_excluded,
+        'skipped_count': skipped_count,
+        'chains': chains_list
+    }
 
 
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
@@ -1602,13 +1915,15 @@ def visualize_dxf_with_status_indicators(
     collector: ErrorCollector,
     show_markers: bool = True,
     font_size_multiplier: float = 1.0,
-    use_original_colors: bool = False
+    use_original_colors: bool = False,
+    show_chains: bool = False
 ) -> Tuple[Optional[Any], Optional[str]]:
     """
     Создает визуализацию с цветовой индикацией статуса объектов.
-    Поддержка исходных цветов из файла
-    Легенда только в режиме индикации ошибок
-    Добавлена обработка ошибок и возврат информации об ошибке
+    НОВОЕ: поддержка визуализации цепей
+    
+    Args:
+        show_chains: Если True, объекты из одной цепи будут выделены одним цветом
     
     Returns:
         Tuple (фигура, сообщение об ошибке или None если успех)
@@ -1622,9 +1937,21 @@ def visualize_dxf_with_status_indicators(
         msp = doc.modelspace()
         
         # Создаём словарь статусов по номерам объектов в файле
-        status_by_real_num: Dict[int, Tuple[ObjectStatus, str]] = {}
+        status_by_real_num: Dict[int, Tuple[ObjectStatus, str, int]] = {}
         for obj in objects_data:
-            status_by_real_num[obj.real_num] = (obj.status, obj.issue_description)
+            status_by_real_num[obj.real_num] = (obj.status, obj.issue_description, obj.chain_id)
+        
+        # Генерация цветов для цепей
+        chain_colors = {}
+        if show_chains:
+            unique_chains = set(obj.chain_id for obj in objects_data if obj.chain_id > 0)
+            import colorsys
+            for i, chain_id in enumerate(sorted(unique_chains)):
+                hue = i / max(len(unique_chains), 1)
+                rgb = colorsys.hsv_to_rgb(hue, 0.7, 0.9)
+                chain_colors[chain_id] = '#{:02x}{:02x}{:02x}'.format(
+                    int(rgb[0]*255), int(rgb[1]*255), int(rgb[2]*255)
+                )
         
         # Рисуем все объекты с правильным цветом
         real_object_num = 0
@@ -1636,10 +1963,14 @@ def visualize_dxf_with_status_indicators(
                 continue
             
             if real_object_num in status_by_real_num:
-                status, _ = status_by_real_num[real_object_num]
+                status, _, chain_id = status_by_real_num[real_object_num]
                 
-                # Логика для выбора цвета
-                if use_original_colors:
+                # Выбор цвета
+                if show_chains and chain_id > 0:
+                    # Режим визуализации цепей
+                    color = chain_colors.get(chain_id, '#000000')
+                    linewidth = 2.0
+                elif use_original_colors:
                     # Используем исходный цвет, но с оверлеем для ошибок
                     draw_entity_manually(ax, entity, use_original_color=True, linewidth=1.5)
                     
@@ -1648,6 +1979,7 @@ def visualize_dxf_with_status_indicators(
                         draw_entity_manually(ax, entity, color=COLOR_ERROR_OVERLAY, linewidth=2.5)
                     elif status == ObjectStatus.WARNING:
                         draw_entity_manually(ax, entity, color=COLOR_WARNING_OVERLAY, linewidth=2.5)
+                    continue
                 else:
                     # Обычная схема цветов по статусу
                     if status == ObjectStatus.ERROR:
@@ -1659,8 +1991,8 @@ def visualize_dxf_with_status_indicators(
                     else:
                         color = '#000000'
                         linewidth = 1.5
-                    
-                    draw_entity_manually(ax, entity, color=color, linewidth=linewidth)
+                
+                draw_entity_manually(ax, entity, color=color, linewidth=linewidth)
             else:
                 # Объект не в расчётах, рисуем серым
                 draw_entity_manually(ax, entity, color='#CCCCCC', linewidth=1.0)
@@ -1703,7 +2035,11 @@ def visualize_dxf_with_status_indicators(
                     if x == 0 and y == 0:
                         continue
                     
-                    if obj.status == ObjectStatus.ERROR:
+                    # Выбор цвета маркера
+                    if show_chains and obj.chain_id > 0:
+                        marker_color = '#FFFFFF'
+                        marker_bg = chain_colors.get(obj.chain_id, '#000000')
+                    elif obj.status == ObjectStatus.ERROR:
                         marker_color = MARKER_COLOR_ERROR
                         marker_bg = MARKER_BG_ERROR
                     elif obj.status == ObjectStatus.WARNING:
@@ -1731,8 +2067,23 @@ def visualize_dxf_with_status_indicators(
                         )
                     )
             
-            # Легенда ТОЛЬКО в режиме индикации ошибок
-            if not use_original_colors:
+            # Легенда
+            if show_chains:
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor='#888888', edgecolor='black', 
+                         label=f'Цепей найдено: {len(chain_colors)}')
+                ]
+                ax.legend(
+                    handles=legend_elements,
+                    loc='lower left',
+                    fontsize=10,
+                    framealpha=0.95,
+                    edgecolor='black',
+                    fancybox=True,
+                    shadow=True
+                )
+            elif not use_original_colors:
                 from matplotlib.patches import Patch
                 legend_elements = [
                     Patch(facecolor='#000000', edgecolor='black', label='✓ Нормальные (учтены)'),
@@ -1883,23 +2234,50 @@ def show_error_report(collector: ErrorCollector):
 # ==================== STREAMLIT ИНТЕРФЕЙС ====================
 
 st.set_page_config(
-    page_title="Анализатор Чертежей CAD Pro v23.1",
+    page_title="Анализатор Чертежей CAD Pro v24.0",
     page_icon="📐",
     layout="wide"
 )
 
-st.title("📐 Анализатор Чертежей CAD Pro v23.1")
+st.title("📐 Анализатор Чертежей CAD Pro v24.0")
 st.markdown("""
 **Профессиональный расчет длины реза для станков ЧПУ и лазерной резки**
 
-### 🎯 Новое в v23.1:
-✅ **ИСПРАВЛЕНО: Правильный подсчёт количества врезок (прожигов)**  
-✅ **Врезка требуется для каждого обрабатываемого объекта**  
-✅ **Объекты с ошибками исключены из врезок**  
-✅ **Объекты с предупреждениями включены в врезки**  
-✅ **Детальная статистика врезок по типам и статусам**  
-✅ **Все функции v22.0 сохранены**  
+### 🎯 Новое в v24.0:
+✅ **ПРАВИЛЬНЫЙ подсчёт врезок с анализом связности контуров**  
+✅ **Автоматическое определение связанных объектов** (например, прямоугольник из 4 LINE = 1 врезка)  
+✅ **Настраиваемый допуск на соединение** (по умолчанию 0.1 мм)  
+✅ **Детальная статистика цепей** (замкнутые, открытые, изолированные)  
+✅ **Визуализация цепей разными цветами**  
+✅ **Присвоение chain_id каждому объекту**  
+✅ **Все функции v23.1 сохранены**  
 """)
+
+with st.expander("ℹ️ Информация о подсчёте врезок"):
+    st.markdown("""
+    ### 📍 Как считаются врезки (точки прожига):
+    
+    **Что такое врезка:**
+    - Это точка, где лазер включается для начала резки
+    - Каждая **связанная цепь объектов** = **1 врезка**
+    
+    **Примеры:**
+    - 1 окружность = 1 врезка ✅
+    - 4 LINE, образующих прямоугольник = 1 врезка ✅ (если концы совпадают)
+    - 4 несвязанных LINE = 4 врезки ✅
+    - 2 дуги, образующих окружность = 1 врезка ✅ (если зазор < допуска)
+    
+    **Алгоритм:**
+    1. Замкнутые объекты (CIRCLE, замкнутые полилинии) = изолированные цепи
+    2. Для открытых объектов строим граф связности по близости концов
+    3. Используется допуск 0.1 мм (настраивается)
+    4. Каждая найденная цепь = 1 врезка
+    
+    **Типы цепей:**
+    - **Замкнутые** - полные контуры (окружности, замкнутые полилинии)
+    - **Открытые группы** - несколько связанных объектов
+    - **Изолированные** - одиночные незамкнутые объекты
+    """)
 
 with st.expander("ℹ️ Информация о цветах"):
     st.markdown("""
@@ -1917,6 +2295,11 @@ with st.expander("ℹ️ Информация о цветах"):
     - Красный = Ошибки (исключены)
     - Серый = Пропущены
     - Легенда отображается в левом нижнем углу
+    
+    **Режим 3: Визуализация цепей (НОВОЕ v24.0)**
+    - Каждая цепь выделена уникальным цветом
+    - Помогает увидеть связанные объекты
+    - Удобно для проверки корректности анализа
     """)
 
 st.markdown("---")
@@ -2027,7 +2410,8 @@ if uploaded_file is not None:
                     status=status,
                     original_length=length,
                     issue_description=issue_desc,
-                    is_closed=is_closed
+                    is_closed=is_closed,
+                    chain_id=-1  # Будет присвоен позже
                 )
                 
                 objects_data.append(dxf_obj)
@@ -2053,8 +2437,12 @@ if uploaded_file is not None:
                 
                 total_length += length
             
-            # Правильный расчёт врезок
-            piercing_count = count_piercings(objects_data, collector)
+            # НОВОЕ: Правильный расчёт врезок с анализом связности
+            piercing_count, piercing_details = count_piercings_advanced(
+                objects_data, collector, tolerance=PIERCING_TOLERANCE
+            )
+            
+            # Получаем детальную статистику
             piercing_stats = get_piercing_statistics(objects_data)
             
             # ==================== ВЫВОД ====================
@@ -2073,7 +2461,7 @@ if uploaded_file is not None:
                 else:
                     st.success(f"✅ Обработано: **{len(objects_data)}** объектов")
                 
-                # ИСПРАВЛЕННЫЙ вывод врезок
+                # Итоговая длина реза
                 st.markdown("### 📏 Итоговая длина реза:")
                 col1, col2, col3, col4, col5 = st.columns(5)
                 with col1:
@@ -2085,58 +2473,66 @@ if uploaded_file is not None:
                 with col4:
                     st.metric("Объектов", f"{len(objects_data)}")
                 with col5:
-                    st.metric("🔵 Врезок (прожигов)", f"{piercing_count}")
+                    st.metric("🔵 Врезок (цепей)", f"{piercing_count}")
                 
-                # НОВОЕ: Детальная статистика врезок (ИСПРАВЛЕННАЯ)
-                st.markdown("### 📍 Статистика врезок (точек прожига):")
+                # НОВОЕ: Детальная статистика врезок с анализом связности
+                st.markdown("### 📍 Статистика врезок (анализ связности):")
                 
-                col_pierce1, col_pierce2, col_pierce3, col_pierce4 = st.columns(4)
+                col_p1, col_p2, col_p3, col_p4, col_p5 = st.columns(5)
                 
-                with col_pierce1:
-                    st.metric("🔵 Всего врезок", piercing_stats['total'], 
-                             delta=f"из {len(objects_data)} объектов")
+                with col_p1:
+                    st.metric("🔵 Всего цепей", piercing_details['total'],
+                             help="Количество связанных групп объектов")
                 
-                with col_pierce2:
-                    st.metric("🔴 Замкнутые контуры", piercing_stats['closed'])
+                with col_p2:
+                    st.metric("🔴 Замкнутые", piercing_details['closed_objects'],
+                             help="Полные контуры (окружности, замкнутые полилинии)")
                 
-                with col_pierce3:
-                    st.metric("➡️ Открытые линии", piercing_stats['open'])
+                with col_p3:
+                    st.metric("🔗 Открытые группы", piercing_details['open_chains'],
+                             help="Несколько связанных открытых объектов")
                 
-                with col_pierce4:
-                    st.metric("❌ Исключено (ошибки)", piercing_stats['errors_excluded'])
+                with col_p4:
+                    st.metric("➡️ Изолированные", piercing_details['isolated_objects'],
+                             help="Одиночные открытые объекты")
                 
-                # По типам объектов
-                if piercing_stats['by_type']:
-                    st.markdown("**Врезки по типам объектов:**")
-                    type_rows = []
-                    for entity_type in sorted(piercing_stats['by_type'].keys()):
-                        count = piercing_stats['by_type'][entity_type]
-                        type_rows.append({
-                            'Тип объекта': entity_type,
-                            'Врезок': count
-                        })
-                    df_types = pd.DataFrame(type_rows)
-                    st.dataframe(df_types, use_container_width=True, hide_index=True)
+                with col_p5:
+                    st.metric("⚙️ Допуск", f"{piercing_details['tolerance_used']} мм",
+                             help="Точки ближе этого значения считаются соединёнными")
                 
-                # По статусам (должно быть только NORMAL и WARNING для врезок)
-                if piercing_stats['by_status']:
-                    st.markdown("**Врезки по статусам обработки:**")
-                    status_rows = []
-                    for status_name in sorted(piercing_stats['by_status'].keys()):
-                        count = piercing_stats['by_status'][status_name]
-                        # Красивый вывод статусов
-                        if "normal" in status_name.lower():
-                            emoji = "✓"
-                        else:
-                            emoji = "⚠"
-                        status_rows.append({
-                            'Статус': f"{emoji} {status_name}",
-                            'Врезок': count
-                        })
-                    df_status = pd.DataFrame(status_rows)
-                    st.dataframe(df_status, use_container_width=True, hide_index=True)
+                # Детали цепей
+                if piercing_details['chains']:
+                    with st.expander(f"🔍 Детали цепей ({len(piercing_details['chains'])} шт.)", expanded=False):
+                        chains_rows = []
+                        for chain_info in piercing_details['chains']:
+                            chain_type_emoji = {
+                                'closed': '🔴',
+                                'open': '🔗',
+                                'isolated': '➡️'
+                            }.get(chain_info['type'], '❓')
+                            
+                            chains_rows.append({
+                                'ID': chain_info['chain_id'],
+                                'Тип': f"{chain_type_emoji} {chain_info['type']}",
+                                'Объектов': chain_info['objects_count'],
+                                'Номера объектов': ', '.join(map(str, chain_info['objects'])),
+                                'Типы': ', '.join(chain_info['entity_types']),
+                                'Длина (мм)': round(chain_info['total_length'], 2)
+                            })
+                        
+                        df_chains = pd.DataFrame(chains_rows)
+                        st.dataframe(df_chains, use_container_width=True, hide_index=True)
+                        
+                        # Экспорт в CSV
+                        csv_chains = df_chains.to_csv(index=False, encoding='utf-8-sig')
+                        st.download_button(
+                            label="📥 Скачать детали цепей (CSV)",
+                            data=csv_chains,
+                            file_name="chains_details.csv",
+                            mime="text/csv"
+                        )
                 
-                # Общая информация (ИСПРАВЛЕННАЯ)
+                # Общая информация (ОБНОВЛЁННАЯ)
                 st.markdown(f"""
                 **📊 ИТОГОВАЯ ИНФОРМАЦИЯ:**
                 
@@ -2146,15 +2542,22 @@ if uploaded_file is not None:
                 | Обработано объектов | {len(objects_data)} |
                 | Объектов с ошибками (исключены) | {len(collector.errors)} |
                 | Объектов с предупреждениями | {len(collector.warnings)} |
-                | **Врезок (точек прожига)** | **{piercing_count}** |
-                | - Замкнутые контуры | {piercing_stats['closed']} |
-                | - Открытые линии | {piercing_stats['open']} |
+                | **Врезок (цепей резки)** | **{piercing_count}** |
+                | - Замкнутые контуры | {piercing_details['closed_objects']} |
+                | - Открытые группы | {piercing_details['open_chains']} |
+                | - Изолированные объекты | {piercing_details['isolated_objects']} |
+                | Допуск на соединение | {piercing_details['tolerance_used']} мм |
                 
                 **⚙️ Расшифровка:**
-                - **Врезки** = точки, где лазер включается для прожига
-                - **Замкнутые** = контуры, врезка внутри
-                - **Открытые** = линии, врезка в начале
-                - **Исключены** = объекты с ошибками, не войдут в резку
+                - **Цепь** = группа связанных объектов, требующая одну врезку
+                - **Замкнутые** = полные контуры (врезка внутри)
+                - **Открытые группы** = несколько связанных LINE/ARC
+                - **Изолированные** = одиночные открытые объекты
+                - **Допуск** = максимальное расстояние для соединения концов
+                
+                **💡 Пример:**
+                - Прямоугольник из 4 LINE = 1 цепь = 1 врезка ✅
+                - 3 отдельных окружности = 3 цепи = 3 врезки ✅
                 """)
                 
                 st.markdown("---")
@@ -2198,25 +2601,14 @@ if uploaded_file is not None:
                     st.markdown("### 🎨 Чертеж с цветовой индикацией")
                     
                     # Опция выбора режима отображения цветов
-                    col_radio, col_legend = st.columns([1, 1])
-                    
-                    with col_radio:
-                        display_mode = st.radio(
-                            "Режим отображения:",
-                            options=["Исходные цвета", "Индикация ошибок"],
-                            horizontal=True
-                        )
-                    
-                    # Показываем легенду ТОЛЬКО в режиме индикации
-                    with col_legend:
-                        if display_mode == "Индикация ошибок":
-                            st.markdown("**Легенда:**")
-                            st.markdown("🔵 Чёрный = Норма")
-                            st.markdown("🟠 Оранжевый = Коррекция")
-                            st.markdown("🔴 Красный = Ошибка")
-                            st.markdown("⚪ Серый = Пропущен")
+                    display_mode = st.radio(
+                        "Режим отображения:",
+                        options=["Исходные цвета", "Индикация ошибок", "Визуализация цепей"],
+                        horizontal=True
+                    )
                     
                     use_original_colors = display_mode == "Исходные цвета"
+                    show_chains = display_mode == "Визуализация цепей"
                     
                     show_markers = st.checkbox("🔴 Показать маркеры", value=True)
                     
@@ -2232,12 +2624,18 @@ if uploaded_file is not None:
                         fig, error_msg = visualize_dxf_with_status_indicators(
                             doc, objects_data, collector,
                             show_markers, font_size_multiplier,
-                            use_original_colors
+                            use_original_colors, show_chains
                         )
                         
                         # Правильная обработка ошибок
                         if fig is not None:
                             st.pyplot(fig, use_container_width=True)
+                            
+                            if show_chains:
+                                st.info(
+                                    f"💡 Каждый цвет = отдельная цепь. "
+                                    f"Найдено {piercing_count} цепей."
+                                )
                         else:
                             if error_msg:
                                 st.error(f"❌ {error_msg}")
@@ -2255,33 +2653,36 @@ if uploaded_file is not None:
 else:
     st.info("👈 Загрузите DXF-чертеж для начала")
     st.markdown("""
-    ### 📝 О версии v23.1 (ИСПРАВЛЕННАЯ):
+    ### 📝 О версии v24.0:
     
-    **ГЛАВНОЕ ИСПРАВЛЕНИЕ:**
-    - ✅ **Правильный подсчёт количества врезок**
-    - ✅ Врезка считается только для объектов со статусом NORMAL и WARNING
-    - ✅ Объекты с ERROR исключены из врезок
-    - ✅ Объекты с SKIPPED не влияют на подсчёт
-    - ✅ Правильная статистика:
-      - По типам объектов (LINE, CIRCLE, ARC и т.д.)
-      - По статусам (NORMAL, WARNING)
-      - По замкнутости (замкнутые vs открытые)
+    **ГЛАВНОЕ УЛУЧШЕНИЕ:**
+    - ✅ **ПРАВИЛЬНЫЙ подсчёт врезок с анализом связности**
+    - ✅ Алгоритм находит связанные объекты (граф смежности)
+    - ✅ Прямоугольник из 4 LINE = 1 врезка (не 4!)
+    - ✅ Настраиваемый допуск на соединение (0.1 мм)
+    - ✅ Детальная статистика цепей:
+      - Замкнутые контуры
+      - Открытые группы
+      - Изолированные объекты
+    - ✅ Визуализация цепей разными цветами
+    - ✅ Присвоение chain_id каждому объекту
+    
+    **ВСЕ ФУНКЦИИ v23.1:**
+    - ✅ Правильное исключение ERROR объектов
+    - ✅ Включение WARNING объектов
     
     **ВСЕ ФУНКЦИИ v22.0:**
-    - ✅ Легенда отображается ТОЛЬКО в режиме "Индикация ошибок"
-    - ✅ Компактная легенда рядом с переключателем режима
-    - ✅ Чистый чертёж в режиме "Исходные цвета"
+    - ✅ Легенда только в нужных режимах
+    - ✅ Компактный интерфейс
     
     **ВСЕ ФУНКЦИИ v17.0:**
-    - ✅ Сохранение исходных цветов линий из DXF файла
-    - ✅ Полная поддержка палитры ACI цветов AutoCAD
-    - ✅ Переключение между режимами отображения
-    - ✅ Группировка по цветам в спецификации
+    - ✅ Исходные цвета из DXF
+    - ✅ Полная палитра ACI
     """)
 
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: gray; font-size: 12px;'>
-    ✂️ CAD Analyzer Pro v23.1 | Лицензия MIT | ИСПРАВЛЕНА ЛОГИКА ВРЕЗОК
+    ✂️ CAD Analyzer Pro v24.0 | Лицензия MIT | АНАЛИЗ СВЯЗНОСТИ КОНТУРОВ
 </div>
 """, unsafe_allow_html=True)
