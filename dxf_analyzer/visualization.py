@@ -44,6 +44,7 @@ def visualize_dxf_with_status_indicators(
         ax.set_ylabel('Y (мм)', fontsize=10)
         
         # Определяем цветовую схему для цепей
+        chain_color_map = {}
         if show_chains:
             unique_chains = list(set(obj.chain_id for obj in objects_data))
             num_chains = len(unique_chains)
@@ -56,6 +57,7 @@ def visualize_dxf_with_status_indicators(
         # Определяем границы чертежа
         all_x, all_y = [], []
         
+        # Отрисовка объектов
         for obj in objects_data:
             entity = obj.entity
             entity_type = entity.dxftype()
@@ -158,55 +160,87 @@ def visualize_dxf_with_status_indicators(
                 all_x.append(center.x)
                 all_y.append(center.y)
         
-        # Маркеры номеров объектов
-        if show_markers:
-            base_font_size = 6 * font_size_multiplier
-            
-            for obj in objects_data:
-                if obj.center:
-                    x, y = obj.center
-                    
-                    # В режиме цепей - показываем ID цепи
-                    if show_chains:
-                        marker_color = chain_color_map.get(obj.chain_id, 'black')
-                        label_text = f"C{obj.chain_id}"
-                        markersize = 4
-                    else:
-                        # Цвет маркера по статусу
-                        if obj.status == ObjectStatus.ERROR:
-                            marker_color = 'red'
-                            markersize = 5
-                        elif obj.status == ObjectStatus.WARNING:
-                            marker_color = 'orange'
-                            markersize = 4
-                        else:
-                            marker_color = 'blue'
-                            markersize = 3
-                        
-                        label_text = f"{obj.num}"
-                    
-                    # Рисуем точку-маркер
-                    ax.plot(x, y, marker='o', color=marker_color, 
-                           markersize=markersize, alpha=0.7, 
-                           markeredgecolor='white', markeredgewidth=0.5)
-                    
-                    # Добавляем текстовую метку
-                    ax.text(x, y, f" {label_text}", 
-                           fontsize=base_font_size,
-                           color=marker_color, 
-                           weight='bold',
-                           ha='left', va='center',
-                           bbox=dict(boxstyle='round,pad=0.3', 
-                                   facecolor='white', 
-                                   alpha=0.8, 
-                                   edgecolor=marker_color,
-                                   linewidth=1))
-        
-        # Настройка осей
+        # Настройка осей (ПЕРЕД маркерами!)
         if all_x and all_y:
             margin = 50
-            ax.set_xlim(min(all_x) - margin, max(all_x) + margin)
-            ax.set_ylim(min(all_y) - margin, max(all_y) + margin)
+            x_min, x_max = min(all_x), max(all_x)
+            y_min, y_max = min(all_y), max(all_y)
+            ax.set_xlim(x_min - margin, x_max + margin)
+            ax.set_ylim(y_min - margin, y_max + margin)
+        
+        # Маркеры номеров объектов (ПОСЛЕ настройки осей!)
+        if show_markers:
+            base_font_size = 6 * font_size_multiplier
+            markers_added = 0
+            
+            print(f"DEBUG: show_markers={show_markers}, objects_count={len(objects_data)}")
+            
+            for obj in objects_data:
+                # Проверка наличия центра
+                if obj.center is None:
+                    print(f"DEBUG: Объект {obj.num} не имеет центра")
+                    continue
+                
+                x, y = obj.center
+                print(f"DEBUG: Объект {obj.num}, центр=({x:.2f}, {y:.2f})")
+                
+                # В режиме цепей - показываем ID цепи
+                if show_chains:
+                    marker_color = chain_color_map.get(obj.chain_id, 'black')
+                    # Конвертируем цвет из массива в hex
+                    if isinstance(marker_color, np.ndarray):
+                        marker_color = tuple(marker_color)
+                    label_text = f"C{obj.chain_id}"
+                    markersize = 6
+                else:
+                    # Цвет маркера по статусу
+                    if obj.status == ObjectStatus.ERROR:
+                        marker_color = 'red'
+                        markersize = 7
+                    elif obj.status == ObjectStatus.WARNING:
+                        marker_color = 'orange'
+                        markersize = 6
+                    else:
+                        marker_color = 'blue'
+                        markersize = 5
+                    
+                    label_text = str(obj.num)
+                
+                # Рисуем точку-маркер
+                ax.plot(x, y, 
+                       marker='o', 
+                       color=marker_color, 
+                       markersize=markersize, 
+                       alpha=0.9, 
+                       markeredgecolor='white', 
+                       markeredgewidth=1.0,
+                       zorder=100)  # zorder - чтобы маркеры были поверх
+                
+                # Добавляем текстовую метку
+                ax.text(x, y, f" {label_text}", 
+                       fontsize=base_font_size,
+                       color=marker_color, 
+                       weight='bold',
+                       ha='left', 
+                       va='center',
+                       zorder=101,  # Текст поверх маркеров
+                       bbox=dict(
+                           boxstyle='round,pad=0.3', 
+                           facecolor='white', 
+                           alpha=0.9, 
+                           edgecolor=marker_color,
+                           linewidth=1.5
+                       ))
+                
+                markers_added += 1
+            
+            print(f"DEBUG: Добавлено маркеров: {markers_added}")
+            
+            # Если маркеры не добавлены, показываем предупреждение
+            if markers_added == 0:
+                collector.add_warning('VISUALIZATION', 0, 
+                                     "Маркеры не отображены: у объектов нет координат центра",
+                                     "MarkerWarning")
         
         # Заголовок
         if show_chains:
@@ -221,4 +255,7 @@ def visualize_dxf_with_status_indicators(
         return fig, None
         
     except Exception as e:
+        import traceback
+        error_details = traceback.format_exc()
+        print(f"ERROR in visualization: {error_details}")
         return None, str(e)
