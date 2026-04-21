@@ -1,5 +1,1 @@
-streamlit>=1.32.0
-ezdxf>=1.3.0
-matplotlib>=3.9.0
-pandas>=2.2.0
-pillow>=10.3.0
+ezdxf>=1.3.0\nmatplotlib>=3.8.0\npandas>=2.2.0\nstreamlit

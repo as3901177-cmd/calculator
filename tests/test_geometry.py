@@ -1,0 +1,1 @@
+def test_safe_float(): assert 1.0 == 1.0

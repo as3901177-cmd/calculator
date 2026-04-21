@@ -1,0 +1,1 @@
+# DXF Analyzer Pro v24.0\nModular version for production use.
