@@ -13,7 +13,7 @@ MAX_CENTER_POINTS = 500
 MAX_FILE_SIZE_MB = 50
 
 # КОНСТАНТА ДЛЯ СВЯЗНОСТИ КОНТУРОВ
-PIERCING_TOLERANCE = 0.1  # мм - точки ближе считаются соединёнными
+PIERCING_TOLERANCE = 0.1  # мм
 
 # ЦВЕТА ОВЕРЛЕЕВ
 COLOR_ERROR_OVERLAY = '#FF0000'
