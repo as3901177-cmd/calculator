@@ -3,7 +3,10 @@
 Главный файл приложения Streamlit.
 """
 
+import sys
 import os
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import tempfile
 import warnings
 from typing import List, Dict, Any
