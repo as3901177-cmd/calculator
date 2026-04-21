@@ -57,6 +57,17 @@ def visualize_dxf_with_status_indicators(
         # Определяем границы чертежа
         all_x, all_y = [], []
         
+        # Функция для замены белого/прозрачного цвета на чёрный
+        def fix_color(color_hex: str) -> str:
+            """Заменяет белые и прозрачные цвета на чёрный"""
+            # Список белых и прозрачных цветов
+            white_colors = ['#FFFFFF', '#ffffff', '#FFF', '#fff', '#FEFEFE', '#fefefe']
+            
+            if color_hex.upper() in [c.upper() for c in white_colors]:
+                return '#000000'  # Чёрный
+            
+            return color_hex
+        
         # Отрисовка объектов
         for obj in objects_data:
             entity = obj.entity
@@ -68,7 +79,9 @@ def visualize_dxf_with_status_indicators(
                 linewidth = 1.5
                 alpha = 0.8
             elif use_original_colors:
-                color = get_aci_color(obj.original_color)
+                # Получаем исходный цвет и заменяем белый на чёрный
+                original_color = get_aci_color(obj.original_color)
+                color = fix_color(original_color)
                 linewidth = 1.0
                 alpha = 0.9
             else:
