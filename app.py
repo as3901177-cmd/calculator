@@ -5,7 +5,15 @@
 
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Добавляем текущую и родительскую директории в путь поиска модулей
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+
+parent_dir = os.path.dirname(current_dir)
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
 
 import tempfile
 import warnings
@@ -15,21 +23,36 @@ from collections import defaultdict
 import pandas as pd
 import streamlit as st
 
-# Локальные импорты
-from dxf_analyzer.config import (
-    install_dependencies, MAX_FILE_SIZE_MB, MIN_LENGTH,
-    ZERO_LENGTH_TYPES, SILENT_SKIP_TYPES, get_color_name, get_aci_color
-)
-from dxf_analyzer.models import DXFObject, ObjectStatus
-from dxf_analyzer.errors import ErrorCollector
-from dxf_analyzer.utils import get_layer_info, calc_entity_safe
-from dxf_analyzer.calculators import calculators
-from dxf_analyzer.geometry import (
-    get_entity_center, check_is_closed,
-    count_piercings_advanced, get_piercing_statistics
-)
-from dxf_analyzer.visualization import visualize_dxf_with_status_indicators
-from dxf_analyzer.ui_components import show_error_report
+# Попытка импорта с обработкой ошибок
+try:
+    from dxf_analyzer.config import (
+        install_dependencies, MAX_FILE_SIZE_MB, MIN_LENGTH,
+        ZERO_LENGTH_TYPES, SILENT_SKIP_TYPES, get_color_name, get_aci_color
+    )
+    from dxf_analyzer.models import DXFObject, ObjectStatus
+    from dxf_analyzer.errors import ErrorCollector
+    from dxf_analyzer.utils import get_layer_info, calc_entity_safe
+    from dxf_analyzer.calculators import calculators
+    from dxf_analyzer.geometry import (
+        get_entity_center, check_is_closed,
+        count_piercings_advanced, get_piercing_statistics
+    )
+    from dxf_analyzer.visualization import visualize_dxf_with_status_indicators
+    from dxf_analyzer.ui_components import show_error_report
+except ModuleNotFoundError as e:
+    st.error(f"❌ Ошибка импорта модулей: {e}")
+    st.info(f"📂 Текущая директория: {current_dir}")
+    st.info(f"📂 Содержимое директории: {os.listdir(current_dir)}")
+    
+    # Проверяем наличие папки dxf_analyzer
+    dxf_analyzer_path = os.path.join(current_dir, 'dxf_analyzer')
+    if os.path.exists(dxf_analyzer_path):
+        st.info(f"✅ Папка dxf_analyzer найдена")
+        st.info(f"📂 Содержимое: {os.listdir(dxf_analyzer_path)}")
+    else:
+        st.error(f"❌ Папка dxf_analyzer НЕ найдена по пути: {dxf_analyzer_path}")
+        st.error("📝 Создайте папку 'dxf_analyzer' и поместите в неё все необходимые модули")
+    st.stop()
 
 # Автоустановка зависимостей
 install_dependencies()
