@@ -1,1 +1,0 @@
-# CAD Analyzer v24.0\nModular Version.
