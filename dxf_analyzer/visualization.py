@@ -159,30 +159,48 @@ def visualize_dxf_with_status_indicators(
                 all_y.append(center.y)
         
         # Маркеры номеров объектов
-        if show_markers and not show_chains:
+        if show_markers:
             base_font_size = 6 * font_size_multiplier
             
             for obj in objects_data:
                 if obj.center:
                     x, y = obj.center
                     
-                    # Цвет маркера по статусу
-                    if obj.status == ObjectStatus.ERROR:
-                        marker_color = 'red'
-                        marker = '❌'
-                    elif obj.status == ObjectStatus.WARNING:
-                        marker_color = 'orange'
-                        marker = '⚠️'
+                    # В режиме цепей - показываем ID цепи
+                    if show_chains:
+                        marker_color = chain_color_map.get(obj.chain_id, 'black')
+                        label_text = f"C{obj.chain_id}"
+                        markersize = 4
                     else:
-                        marker_color = 'blue'
-                        marker = '●'
+                        # Цвет маркера по статусу
+                        if obj.status == ObjectStatus.ERROR:
+                            marker_color = 'red'
+                            markersize = 5
+                        elif obj.status == ObjectStatus.WARNING:
+                            marker_color = 'orange'
+                            markersize = 4
+                        else:
+                            marker_color = 'blue'
+                            markersize = 3
+                        
+                        label_text = f"{obj.num}"
                     
+                    # Рисуем точку-маркер
                     ax.plot(x, y, marker='o', color=marker_color, 
-                           markersize=3, alpha=0.6)
-                    ax.text(x, y, f" {obj.num}", fontsize=base_font_size,
-                           color=marker_color, weight='bold',
+                           markersize=markersize, alpha=0.7, 
+                           markeredgecolor='white', markeredgewidth=0.5)
+                    
+                    # Добавляем текстовую метку
+                    ax.text(x, y, f" {label_text}", 
+                           fontsize=base_font_size,
+                           color=marker_color, 
+                           weight='bold',
+                           ha='left', va='center',
                            bbox=dict(boxstyle='round,pad=0.3', 
-                                   facecolor='white', alpha=0.7, edgecolor=marker_color))
+                                   facecolor='white', 
+                                   alpha=0.8, 
+                                   edgecolor=marker_color,
+                                   linewidth=1))
         
         # Настройка осей
         if all_x and all_y:
@@ -192,7 +210,8 @@ def visualize_dxf_with_status_indicators(
         
         # Заголовок
         if show_chains:
-            title = f"Визуализация цепей ({len(set(obj.chain_id for obj in objects_data))} цепей)"
+            num_chains = len(set(obj.chain_id for obj in objects_data))
+            title = f"Визуализация цепей ({num_chains} цепей)"
         else:
             title = "Визуализация чертежа"
         
