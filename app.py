@@ -1,4 +1,4 @@
- """
+"""
 Анализатор Чертежей CAD Pro v24.0
 Главный файл приложения Streamlit.
 """
@@ -16,11 +16,6 @@ from dxf_analyzer.config import (
     install_dependencies, MAX_FILE_SIZE_MB, MIN_LENGTH,
     ZERO_LENGTH_TYPES, SILENT_SKIP_TYPES, get_color_name, get_aci_color
 )
-# Локальные импорты
-from dxf_analyzer.config import (
-    install_dependencies, MAX_FILE_SIZE_MB, MIN_LENGTH,
-    ZERO_LENGTH_TYPES, SILENT_SKIP_TYPES, get_color_name, get_aci_color
-)
 from dxf_analyzer.models import DXFObject, ObjectStatus
 from dxf_analyzer.errors import ErrorCollector
 from dxf_analyzer.utils import get_layer_info, calc_entity_safe
@@ -31,17 +26,7 @@ from dxf_analyzer.geometry import (
 )
 from dxf_analyzer.visualization import visualize_dxf_with_status_indicators
 from dxf_analyzer.ui_components import show_error_report
-from dxf_analyzer.nesting_optimizer import render_nesting_optimizer_tab  # ← ДОБАВЬТЕ ЭТУ СТРОКУ
-from dxf_analyzer.models import DXFObject, ObjectStatus
-from dxf_analyzer.errors import ErrorCollector
-from dxf_analyzer.utils import get_layer_info, calc_entity_safe
-from dxf_analyzer.calculators import calculators
-from dxf_analyzer.geometry import (
-    get_entity_center, check_is_closed,
-    count_piercings_advanced, get_piercing_statistics
-)
-from dxf_analyzer.visualization import visualize_dxf_with_status_indicators
-from dxf_analyzer.ui_components import show_error_report
+from dxf_analyzer.nesting_optimizer import render_nesting_optimizer_tab
 
 # Автоустановка зависимостей
 install_dependencies()
@@ -273,27 +258,6 @@ if uploaded_file is not None:
                                 'Типы': ', '.join(chain['entity_types']),
                                 'Длина (мм)': round(chain['total_length'], 2)
                             })
-                        if fig is not None:
-                            st.pyplot(fig, use_container_width=True)
-                            if show_chains:
-                                st.info(f"💡 Каждый цвет = отдельная цепь. Найдено {piercing_count} цепей.")
-                        else:
-                            st.error(f"❌ {error_msg}" if error_msg else "❌ Не удалось создать визуализацию")
- if fig is not None:
-                            st.pyplot(fig, use_container_width=True)
-                            if show_chains:
-                                st.info(f"💡 Каждый цвет = отдельная цепь. Найдено {piercing_count} цепей.")
-                        else:
-                            st.error(f"❌ {error_msg}" if error_msg else "❌ Не удалось создать визуализацию")
-                
-                # =============== НОВЫЙ МОДУЛЬ РАСКРОЯ ===============
-                st.markdown("---")
-                render_nesting_optimizer_tab(objects_data)
-                # ====================================================
-        
-        except Exception as e:
-            collector.add_error('SYSTEM', 0, f"Критическая ошибка: {e}", type(e).__name__)
-            show_error_report(collector)
                         
                         df_chains = pd.DataFrame(chains_rows)
                         st.dataframe(df_chains, use_container_width=True, hide_index=True)
@@ -365,6 +329,10 @@ if uploaded_file is not None:
                                 st.info(f"💡 Каждый цвет = отдельная цепь. Найдено {piercing_count} цепей.")
                         else:
                             st.error(f"❌ {error_msg}" if error_msg else "❌ Не удалось создать визуализацию")
+                
+                # ==================== МОДУЛЬ РАСКРОЯ ====================
+                st.markdown("---")
+                render_nesting_optimizer_tab(objects_data)
         
         except Exception as e:
             collector.add_error('SYSTEM', 0, f"Критическая ошибка: {e}", type(e).__name__)
