@@ -1,7 +1,6 @@
 """
 Модуль оптимизации раскроя деталей на листах материала.
-Версия 4.0 - Продвинутая оптимизация с учетом реальной формы деталей.
-Размещает детали любой сложной формы с поворотами под любым углом.
+Версия 4.1 - ПЛОТНАЯ УПАКОВКА с Bottom-Left алгоритмом.
 """
 
 import math
@@ -14,7 +13,7 @@ from matplotlib.patches import Polygon, Rectangle
 import streamlit as st
 import pandas as pd
 import numpy as np
-from shapely.geometry import Polygon as ShapelyPolygon, Point, LineString
+from shapely.geometry import Polygon as ShapelyPolygon, Point, LineString, box
 from shapely.affinity import rotate, translate
 from shapely.ops import unary_union
 
@@ -30,9 +29,9 @@ class PlacedPart:
     part_name: str
     x: float
     y: float
-    rotation: float  # угол поворота в градусах
-    geometry: ShapelyPolygon  # реальная геометрия детали
-    bounding_box: Tuple[float, float, float, float]  # minx, miny, maxx, maxy
+    rotation: float
+    geometry: ShapelyPolygon
+    bounding_box: Tuple[float, float, float, float]
 
 
 @dataclass
@@ -40,7 +39,7 @@ class Sheet:
     """Лист материала с размещёнными деталями."""
     sheet_number: int
     width: float
-    height: height
+    height: float
     parts: List[PlacedPart]
     used_area: float
     efficiency: float
@@ -71,18 +70,10 @@ class NestingResult:
     algorithm_used: str
 
 
-# ==================== ИЗВЛЕЧЕНИЕ ГЕОМЕТРИИ ЧЕРТЕЖА ====================
+# ==================== ИЗВЛЕЧЕНИЕ ГЕОМЕТРИИ ====================
 
 def extract_drawing_geometry(objects_data: List[Any]) -> Optional[ShapelyPolygon]:
-    """
-    Извлекает реальную геометрию ВСЕГО чертежа как полигон.
-    
-    Args:
-        objects_data: Список DXFObject
-    
-    Returns:
-        ShapelyPolygon или None если нет объектов
-    """
+    """Извлекает реальную геометрию всего чертежа как полигон."""
     lines = []
     
     for obj in objects_data:
@@ -112,7 +103,7 @@ def extract_drawing_geometry(objects_data: List[Any]) -> Optional[ShapelyPolygon
                 points = list(obj.entity.points())
                 if len(points) >= 2:
                     line_coords = [(p.x, p.y) for p in points]
-                    if obj.is_closed and len(points) >= 3:
+                    if obj.entity.is_closed and len(points) >= 3:
                         polygon = ShapelyPolygon(line_coords)
                         if polygon.is_valid:
                             return polygon
@@ -122,7 +113,6 @@ def extract_drawing_geometry(objects_data: List[Any]) -> Optional[ShapelyPolygon
             elif entity_type == 'CIRCLE':
                 center = obj.entity.dxf.center
                 radius = obj.entity.dxf.radius
-                # Создаем приближенный круг
                 circle_points = []
                 for i in range(36):
                     angle = i * 10
@@ -168,18 +158,16 @@ def extract_drawing_geometry(objects_data: List[Any]) -> Optional[ShapelyPolygon
     if not lines:
         return None
     
-    # Объединяем все линии в одну геометрию
     try:
         union = unary_union(lines)
         if union.is_empty:
             return None
         
-        # Если получились замкнутые контуры, используем их
+        # Пытаемся создать полигоны из замкнутых контуров
         if hasattr(union, 'geoms'):
             polygons = []
             for geom in union.geoms:
                 if isinstance(geom, LineString) and len(geom.coords) >= 3:
-                    # Пытаемся создать полигон из замкнутой линии
                     coords = list(geom.coords)
                     if coords[0] == coords[-1]:
                         poly = ShapelyPolygon(coords)
@@ -189,10 +177,8 @@ def extract_drawing_geometry(objects_data: List[Any]) -> Optional[ShapelyPolygon
             if polygons:
                 return unary_union(polygons)
         
-        # Если не получилось создать полигоны, создаем охватывающий прямоугольник
+        # Создаем охватывающий прямоугольник
         bounds = union.bounds
-        width = bounds[2] - bounds[0]
-        height = bounds[3] - bounds[1]
         rect_coords = [
             (bounds[0], bounds[1]),
             (bounds[2], bounds[1]),
@@ -207,12 +193,12 @@ def extract_drawing_geometry(objects_data: List[Any]) -> Optional[ShapelyPolygon
         return None
 
 
-# ==================== АЛГОРИТМ РАСКРОЯ С УЧЕТОМ ФОРМЫ ====================
+# ==================== ПРОДВИНУТЫЙ АЛГОРИТМ РАСКРОЯ ====================
 
 class AdvancedNestingOptimizer:
     """
-    Продвинутый алгоритм раскроя с учетом реальной формы деталей.
-    Поддерживает повороты под любым углом.
+    Продвинутый алгоритм раскроя с ПЛОТНОЙ УПАКОВКОЙ.
+    Использует Bottom-Left-Fill стратегию для максимальной плотности.
     """
     
     def __init__(self, sheet_width: float, sheet_height: float, 
@@ -220,19 +206,14 @@ class AdvancedNestingOptimizer:
         self.sheet_width = sheet_width
         self.sheet_height = sheet_height
         self.spacing = spacing
-        self.rotation_step = rotation_step  # шаг поворота в градусах
+        self.rotation_step = rotation_step
     
     def optimize(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
-        """
-        Выполняет оптимизацию раскроя для заданного количества деталей.
+        """Выполняет оптимизацию раскроя."""
         
-        Args:
-            part_geometry: Реальная геометрия одной детали
-            quantity: Количество деталей для размещения
+        # Нормализуем геометрию (центрируем в (0,0))
+        normalized_geom = self._normalize_geometry(part_geometry)
         
-        Returns:
-            NestingResult с результатами размещения
-        """
         sheets: List[Sheet] = []
         parts_placed = 0
         
@@ -241,12 +222,12 @@ class AdvancedNestingOptimizer:
             
             # Пробуем разместить на существующих листах
             for sheet in sheets:
-                if self._try_place_on_sheet(sheet, part_num, part_geometry):
+                if self._try_place_on_sheet(sheet, part_num, normalized_geom):
                     placed = True
                     parts_placed += 1
                     break
             
-            # Если не поместилось, создаём новый лист
+            # Создаём новый лист
             if not placed:
                 new_sheet = Sheet(
                     sheet_number=len(sheets) + 1,
@@ -257,11 +238,10 @@ class AdvancedNestingOptimizer:
                     efficiency=0.0
                 )
                 
-                if self._try_place_on_sheet(new_sheet, part_num, part_geometry):
+                if self._try_place_on_sheet(new_sheet, part_num, normalized_geom):
                     sheets.append(new_sheet)
                     parts_placed += 1
                 else:
-                    # Деталь не влезает даже на новый лист
                     break
         
         parts_not_placed = quantity - parts_placed
@@ -277,15 +257,22 @@ class AdvancedNestingOptimizer:
             total_material_used=total_material_used,
             total_waste=total_waste,
             average_efficiency=average_efficiency,
-            algorithm_used="Advanced Shape-Based Nesting"
+            algorithm_used="Bottom-Left-Fill with Rotation"
         )
+    
+    def _normalize_geometry(self, geom: ShapelyPolygon) -> ShapelyPolygon:
+        """Нормализует геометрию - перемещает центр в (0,0)."""
+        bounds = geom.bounds
+        center_x = (bounds[0] + bounds[2]) / 2
+        center_y = (bounds[1] + bounds[3]) / 2
+        return translate(geom, xoff=-center_x, yoff=-center_y)
     
     def _try_place_on_sheet(self, sheet: Sheet, part_id: int, geometry: ShapelyPolygon) -> bool:
         """
-        Пытается разместить деталь на листе с оптимальным поворотом.
+        Пытается разместить деталь на листе используя Bottom-Left-Fill стратегию.
         """
         best_placement = None
-        best_score = float('-inf')
+        best_score = float('inf')  # Минимизируем высоту размещения
         
         # Пробуем разные углы поворота
         angles = list(range(0, 360, int(self.rotation_step)))
@@ -294,21 +281,24 @@ class AdvancedNestingOptimizer:
             # Поворачиваем деталь
             rotated_geom = rotate(geometry, angle, origin='centroid')
             
-            # Находим лучшую позицию для этого угла
-            position = self._find_best_position(sheet, rotated_geom)
+            # Находим лучшую позицию для этого угла (Bottom-Left)
+            position = self._find_bottom_left_position(sheet, rotated_geom)
             
             if position is not None:
                 x, y = position
                 
-                # Оцениваем качество размещения
-                score = self._evaluate_placement(sheet, x, y, rotated_geom)
+                # Оцениваем размещение - чем ниже и левее, тем лучше
+                score = y * 1000 + x  # Приоритет высоте, потом ширине
                 
-                if score > best_score:
+                if score < best_score:
                     best_score = score
                     best_placement = (x, y, angle, rotated_geom)
         
         if best_placement is not None:
             x, y, angle, final_geom = best_placement
+            
+            # Перемещаем геометрию на позицию
+            placed_geom = translate(final_geom, xoff=x, yoff=y)
             
             # Размещаем деталь
             placed_part = PlacedPart(
@@ -317,8 +307,8 @@ class AdvancedNestingOptimizer:
                 x=x,
                 y=y,
                 rotation=angle,
-                geometry=translate(final_geom, xoff=x, yoff=y),
-                bounding_box=translate(final_geom, xoff=x, yoff=y).bounds
+                geometry=placed_geom,
+                bounding_box=placed_geom.bounds
             )
             
             sheet.parts.append(placed_part)
@@ -329,113 +319,120 @@ class AdvancedNestingOptimizer:
         
         return False
     
-    def _find_best_position(self, sheet: Sheet, geometry: ShapelyPolygon) -> Optional[Tuple[float, float]]:
+    def _find_bottom_left_position(self, sheet: Sheet, geometry: ShapelyPolygon) -> Optional[Tuple[float, float]]:
         """
-        Находит лучшую позицию для размещения с учетом формы.
+        Находит Bottom-Left позицию для размещения детали.
+        Стратегия: размещаем максимально низко и слева.
         """
         bounds = geometry.bounds
-        width = bounds[2] - bounds[0]
-        height = bounds[3] - bounds[1]
+        part_width = bounds[2] - bounds[0]
+        part_height = bounds[3] - bounds[1]
         
         # Проверка, что деталь помещается на лист
-        if width > self.sheet_width or height > self.sheet_height:
+        if part_width > self.sheet_width or part_height > self.sheet_height:
             return None
         
-        best_position = None
-        min_distance_to_others = float('inf')
+        # Если лист пуст - размещаем в (0, 0)
+        if not sheet.parts:
+            # Учитываем смещение от центра геометрии
+            offset_x = -bounds[0]
+            offset_y = -bounds[1]
+            
+            test_geom = translate(geometry, xoff=offset_x, yoff=offset_y)
+            
+            if self._fits_on_sheet(test_geom):
+                return (offset_x, offset_y)
+            else:
+                return None
         
-        # Создаем сетку возможных позиций
-        step_x = max(10, int(width / 5))
-        step_y = max(10, int(height / 5))
+        # Создаем список потенциальных позиций
+        candidate_positions = []
         
-        for x in range(0, int(self.sheet_width - width + 1), step_x):
-            for y in range(0, int(self.sheet_height - height + 1), step_y):
-                # Проверяем возможность размещения
-                test_geom = translate(geometry, xoff=x, yoff=y)
-                
-                if self._can_place_at(sheet, test_geom):
-                    # Оцениваем плотность размещения
-                    distance_score = self._calculate_distance_score(sheet, test_geom)
-                    
-                    if distance_score < min_distance_to_others:
-                        min_distance_to_others = distance_score
-                        best_position = (x, y)
+        # 1. Позиции вдоль нижней границы листа (y=0)
+        for x in range(0, int(self.sheet_width - part_width + 1), 5):
+            candidate_positions.append((x, 0))
         
-        # Если не нашли в сетке, пробуем Bottom-Left
-        if best_position is None:
-            # Пытаемся разместить в левом нижнем углу
-            test_geom = translate(geometry, xoff=0, yoff=0)
+        # 2. Позиции вдоль левой границы листа (x=0)
+        for y in range(0, int(self.sheet_height - part_height + 1), 5):
+            candidate_positions.append((0, y))
+        
+        # 3. Позиции около уже размещенных деталей
+        for part in sheet.parts:
+            part_bounds = part.bounding_box
+            
+            # Справа от детали
+            x_right = part_bounds[2] + self.spacing
+            # Сверху от детали
+            y_top = part_bounds[3] + self.spacing
+            # Слева от детали
+            x_left = part_bounds[0] - part_width - self.spacing
+            # Снизу от детали
+            y_bottom = part_bounds[1] - part_height - self.spacing
+            
+            # Добавляем 4 позиции вокруг каждой детали
+            candidate_positions.extend([
+                (x_right, part_bounds[1]),  # Справа внизу
+                (x_right, part_bounds[3] - part_height),  # Справа вверху
+                (part_bounds[0], y_top),  # Сверху слева
+                (part_bounds[2] - part_width, y_top),  # Сверху справа
+                (x_left, part_bounds[1]),  # Слева внизу
+                (x_left, part_bounds[3] - part_height),  # Слева вверху
+                (part_bounds[0], y_bottom),  # Снизу слева
+                (part_bounds[2] - part_width, y_bottom)  # Снизу справа
+            ])
+        
+        # Сортируем позиции: сначала по Y (снизу вверх), потом по X (слева направо)
+        candidate_positions.sort(key=lambda pos: (pos[1], pos[0]))
+        
+        # Проверяем каждую позицию
+        for x, y in candidate_positions:
+            if x < 0 or y < 0:
+                continue
+            
+            # Учитываем смещение от центра геометрии
+            offset_x = x - bounds[0]
+            offset_y = y - bounds[1]
+            
+            test_geom = translate(geometry, xoff=offset_x, yoff=offset_y)
+            
             if self._can_place_at(sheet, test_geom):
-                best_position = (0, 0)
+                return (offset_x, offset_y)
         
-        return best_position
+        return None
+    
+    def _fits_on_sheet(self, geometry: ShapelyPolygon) -> bool:
+        """Проверяет, помещается ли геометрия на лист."""
+        bounds = geometry.bounds
+        return (bounds[0] >= 0 and bounds[1] >= 0 and 
+                bounds[2] <= self.sheet_width and bounds[3] <= self.sheet_height)
     
     def _can_place_at(self, sheet: Sheet, geometry: ShapelyPolygon) -> bool:
-        """
-        Проверяет, можно ли разместить деталь в заданной позиции.
-        """
-        # Проверка выхода за границы листа
-        bounds = geometry.bounds
-        if (bounds[0] < 0 or bounds[1] < 0 or 
-            bounds[2] > self.sheet_width or bounds[3] > self.sheet_height):
+        """Проверяет, можно ли разместить деталь в заданной позиции."""
+        
+        # Проверка границ листа
+        if not self._fits_on_sheet(geometry):
             return False
         
         # Проверка пересечения с другими деталями
         for part in sheet.parts:
+            # Вычисляем расстояние между деталями
+            distance = geometry.distance(part.geometry)
+            
+            # Проверяем пересечение с учетом отступа
+            if distance < self.spacing:
+                return False
+            
+            # Дополнительная проверка пересечения
             if geometry.intersects(part.geometry):
-                distance = geometry.distance(part.geometry)
-                if distance < self.spacing:
-                    return False
+                return False
         
         return True
-    
-    def _calculate_distance_score(self, sheet: Sheet, geometry: ShapelyPolygon) -> float:
-        """
-        Оценивает качество размещения по расстоянию до других деталей.
-        """
-        if not sheet.parts:
-            return 0.0
-        
-        total_distance = 0.0
-        for part in sheet.parts:
-            distance = geometry.distance(part.geometry)
-            total_distance += distance
-        
-        return -total_distance  # Минус потому что хотим максимизировать расстояние
-    
-    def _evaluate_placement(self, sheet: Sheet, x: float, y: float, geometry: ShapelyPolygon) -> float:
-        """
-        Оценивает качество размещения.
-        """
-        score = 0.0
-        
-        # Бонус за близость к другим деталям (плотная упаковка)
-        if sheet.parts:
-            min_distance = float('inf')
-            for part in sheet.parts:
-                test_geom = translate(geometry, xoff=x, yoff=y)
-                distance = test_geom.distance(part.geometry)
-                min_distance = min(min_distance, distance)
-            
-            # Чем ближе, тем выше оценка (но не меньше минимального отступа)
-            if min_distance >= self.spacing:
-                score += (100 - min_distance) * 0.1
-        
-        # Бонус за близость к краям (если это первая деталь)
-        if not sheet.parts:
-            edge_dist = min(x, y, self.sheet_width - x, self.sheet_height - y)
-            score += (100 - edge_dist) * 0.05
-        
-        # Штраф за большой угол поворота (если нужно минимизировать повороты)
-        # score -= abs(rotation) * 0.01
-        
-        return score
 
 
 # ==================== ВИЗУАЛИЗАЦИЯ ====================
 
 def visualize_nesting_result(result: NestingResult, sheet_index: int = 0) -> plt.Figure:
-    """Визуализация раскроя с учетом реальной формы деталей."""
+    """Визуализация раскроя с реальной формой деталей."""
     if sheet_index >= len(result.sheets):
         raise ValueError(f"Лист #{sheet_index + 1} не найден")
     
@@ -472,19 +469,18 @@ def visualize_nesting_result(result: NestingResult, sheet_index: int = 0) -> plt
         )
     else:
         # Цвета для деталей
-        colors = plt.cm.Set3(np.linspace(0, 1, len(sheet.parts)))
+        colors = plt.cm.tab20(np.linspace(0, 1, max(20, len(sheet.parts))))
         
         for i, part in enumerate(sheet.parts):
-            # Получаем координаты полигона
             if isinstance(part.geometry, ShapelyPolygon):
                 exterior_coords = list(part.geometry.exterior.coords)
                 if len(exterior_coords) > 2:
                     # Рисуем полигон детали
                     polygon = Polygon(
                         exterior_coords,
-                        linewidth=2.5, edgecolor='#000000', 
+                        linewidth=2, edgecolor='#000000', 
                         facecolor=colors[i % len(colors)],
-                        alpha=0.85, zorder=10
+                        alpha=0.8, zorder=10
                     )
                     ax.add_patch(polygon)
                     
@@ -493,26 +489,29 @@ def visualize_nesting_result(result: NestingResult, sheet_index: int = 0) -> plt
                     center_x, center_y = centroid.x, centroid.y
                     
                     # Подпись
+                    label_text = f"#{part.part_id}"
+                    if part.rotation != 0:
+                        label_text += f"\n{part.rotation:.0f}°"
+                    
                     ax.text(
                         center_x, center_y,
-                        f"#{part.part_id}\n{part.rotation:.0f}°",
+                        label_text,
                         ha='center', va='center',
-                        fontsize=10, fontweight='bold', color='#000000',
+                        fontsize=9, fontweight='bold', color='#000000',
                         zorder=20,
                         bbox=dict(
                             boxstyle='round,pad=0.3',
                             facecolor='white',
-                            alpha=0.95,
+                            alpha=0.9,
                             edgecolor='#333333',
-                            linewidth=1.5
+                            linewidth=1
                         )
                     )
                     
-                    # Отображаем направление поворота
+                    # Стрелка направления поворота
                     if part.rotation != 0:
-                        # Рисуем стрелку направления
-                        arrow_length = min(part.geometry.bounds[2] - part.geometry.bounds[0],
-                                         part.geometry.bounds[3] - part.geometry.bounds[1]) * 0.3
+                        bounds = part.geometry.bounds
+                        arrow_length = min(bounds[2] - bounds[0], bounds[3] - bounds[1]) * 0.25
                         angle_rad = math.radians(part.rotation)
                         arrow_dx = arrow_length * math.cos(angle_rad)
                         arrow_dy = arrow_length * math.sin(angle_rad)
@@ -520,21 +519,22 @@ def visualize_nesting_result(result: NestingResult, sheet_index: int = 0) -> plt
                         ax.arrow(
                             center_x, center_y,
                             arrow_dx, arrow_dy,
-                            head_width=5, head_length=8,
+                            head_width=arrow_length * 0.3,
+                            head_length=arrow_length * 0.4,
                             fc='red', ec='red',
-                            zorder=15, alpha=0.8
+                            zorder=15, alpha=0.7, linewidth=1.5
                         )
     
     # Настройка осей
-    margin_x = sheet.width * 0.03
-    margin_y = sheet.height * 0.03
+    margin_x = sheet.width * 0.02
+    margin_y = sheet.height * 0.02
     
     ax.set_xlim(-margin_x, sheet.width + margin_x)
     ax.set_ylim(-margin_y, sheet.height + margin_y)
     ax.set_aspect('equal', adjustable='box')
     
     # Сетка
-    ax.grid(True, alpha=0.4, linestyle=':', linewidth=1, color='#AAAAAA')
+    ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.8, color='#AAAAAA')
     
     # Деления осей
     step = max(100, int(sheet.width / 20) // 100 * 100)
@@ -559,38 +559,19 @@ def visualize_nesting_result(result: NestingResult, sheet_index: int = 0) -> plt
     ax.set_xlabel('Ширина (мм)', fontsize=11, fontweight='bold')
     ax.set_ylabel('Высота (мм)', fontsize=11, fontweight='bold')
     
-    # Легенда
-    if sheet.parts:
-        legend_elements = [
-            plt.Line2D([0], [0], color='#FF0000', linewidth=4, linestyle='--', label='Границы листа'),
-            plt.Line2D([0], [0], marker='s', color='w', markerfacecolor='#888888',
-                      markersize=10, label=f'Детали ({len(sheet.parts)} шт.)'),
-            plt.Line2D([0], [0], marker='^', color='w', markerfacecolor='red',
-                      markersize=8, label='Направление поворота')
-        ]
-        ax.legend(
-            handles=legend_elements,
-            loc='upper right',
-            fontsize=9,
-            framealpha=0.95,
-            edgecolor='black'
-        )
-    
     # Статистика
-    stats_text = f"""
-СТАТИСТИКА:
+    stats_text = f"""СТАТИСТИКА:
 Площадь листа: {sheet.total_area/1e6:.3f} м²
 Использовано: {sheet.used_area/1e6:.3f} м²
 Отходы: {sheet.waste_area/1e6:.3f} м²
-Эффективность: {sheet.efficiency:.1f}%
-    """.strip()
+Эффективность: {sheet.efficiency:.1f}%"""
     
     ax.text(
         0.02, 0.98, stats_text,
         transform=ax.transAxes,
         fontsize=9,
         verticalalignment='top',
-        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.8),
+        bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.85),
         family='monospace'
     )
     
@@ -609,8 +590,8 @@ def export_nesting_to_csv(result: NestingResult) -> str:
             rows.append({
                 'Лист': sheet.sheet_number,
                 'Деталь №': part.part_id,
-                'X центра (мм)': round((bounds[0] + bounds[2]) / 2, 2),
-                'Y центра (мм)': round((bounds[1] + bounds[3]) / 2, 2),
+                'X (мм)': round(part.x, 2),
+                'Y (мм)': round(part.y, 2),
                 'Угол поворота (°)': round(part.rotation, 2),
                 'Ширина габарита (мм)': round(bounds[2] - bounds[0], 2),
                 'Высота габарита (мм)': round(bounds[3] - bounds[1], 2),
@@ -642,15 +623,15 @@ def export_summary_to_csv(result: NestingResult) -> str:
 def render_nesting_optimizer_tab(objects_data: List[Any]):
     """Отрисовывает вкладку оптимизации раскроя."""
     st.markdown("## 🔲 Продвинутая оптимизация раскроя")
-    st.markdown("**Размещение деталей с учетом реальной формы и поворотов под любым углом.**")
+    st.markdown("**Плотная упаковка деталей с учетом реальной формы и поворотов.**")
     
-    st.info("💡 **Логика:** Весь загруженный чертёж = 1 деталь. Алгоритм анализирует реальную форму и размещает копии с оптимальными поворотами.")
+    st.info("💡 **Логика:** Весь загруженный чертёж = 1 деталь. Алгоритм Bottom-Left-Fill размещает копии максимально плотно.")
     
     if not objects_data:
         st.warning("⚠️ Нет данных для оптимизации. Загрузите и обработайте DXF файл.")
         return
     
-    # Извлекаем реальную геометрию чертежа
+    # Извлекаем геометрию
     with st.spinner('🔍 Анализ геометрии чертежа...'):
         part_geometry = extract_drawing_geometry(objects_data)
     
@@ -658,7 +639,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any]):
         st.error("❌ Не удалось определить геометрию чертежа.")
         return
     
-    # Показываем информацию о геометрии
+    # Информация о геометрии
     bounds = part_geometry.bounds
     width = bounds[2] - bounds[0]
     height = bounds[3] - bounds[1]
@@ -673,10 +654,10 @@ def render_nesting_optimizer_tab(objects_data: List[Any]):
     with col_info3:
         st.metric("Площадь", f"{part_geometry.area/1e6:.4f} м²")
     with col_info4:
-        st.metric("Тип геометрии", "Полигон" if isinstance(part_geometry, ShapelyPolygon) else "Линии")
+        st.metric("Периметр", f"{part_geometry.length:.2f} мм")
     
     # Предпросмотр геометрии
-    with st.expander("🔍 Предпросмотр геометрии детали", expanded=True):
+    with st.expander("🔍 Предпросмотр геометрии детали", expanded=False):
         fig, ax = plt.subplots(figsize=(10, 8), dpi=100)
         fig.patch.set_facecolor('#FFFFFF')
         ax.set_facecolor('#F8F8F8')
@@ -697,7 +678,6 @@ def render_nesting_optimizer_tab(objects_data: List[Any]):
         ax.set_xlabel('X (мм)')
         ax.set_ylabel('Y (мм)')
         
-        # Автоматические границы
         margin = max(width, height) * 0.1
         ax.set_xlim(bounds[0] - margin, bounds[2] + margin)
         ax.set_ylim(bounds[1] - margin, bounds[3] + margin)
@@ -730,7 +710,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any]):
         quantity = st.number_input(
             "Количество деталей",
             min_value=1, max_value=1000,
-            value=10, step=1,
+            value=20, step=1,
             help="Сколько копий детали нужно разместить"
         )
         spacing = st.number_input(
@@ -741,8 +721,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any]):
         )
         rotation_step = st.slider(
             "Точность поворота (°)",
-            min_value=5.0, max_value=45.0,
-            value=15.0, step=5.0,
+            min_value=5.0, max_value=90.0,
+            value=45.0, step=5.0,
             help="Шаг перебора углов поворота (меньше = точнее, но медленнее)"
         )
     
