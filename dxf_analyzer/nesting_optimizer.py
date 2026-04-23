@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 2.1 - с полным Streamlit интерфейсом.
+Версия 2.2 - с полным Streamlit интерфейсом и всеми импортами.
 """
 
 import math
@@ -194,8 +194,6 @@ def get_tessellation_params(geom: ShapelyPolygon) -> Optional[dict]:
             'base_length': base_length,
             'height': height,
             'triangle_type': triangle_type,
-            'base_vector': (base_length, 0),
-            'height_vector': (0, height)
         }
         
     except Exception as e:
@@ -426,7 +424,8 @@ class AdvancedNestingOptimizer:
                             part_id += 1
         
         for sheet in sheets:
-            sheet.efficiency = (sheet.used_area / sheet.total_area) * 100 if sheet.total_area > 0 else 0
+            if sheet.total_area > 0:
+                sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
         
         total_material = sum(s.total_area for s in sheets)
         total_waste = sum(s.waste_area for s in sheets)
@@ -473,7 +472,8 @@ class AdvancedNestingOptimizer:
                     break
         
         for sheet in sheets:
-            sheet.efficiency = (sheet.used_area / sheet.total_area) * 100 if sheet.total_area > 0 else 0
+            if sheet.total_area > 0:
+                sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
         
         total_material = sum(s.total_area for s in sheets)
         total_waste = sum(s.waste_area for s in sheets)
@@ -615,225 +615,234 @@ class AdvancedNestingOptimizer:
 
 def render_nesting_optimizer_tab(objects_data: List[Any] = None):
     """Отрисовывает вкладку оптимизации раскроя в Streamlit."""
+    # Импортируем внутри функции, чтобы избежать проблем с зависимостями
     try:
         import streamlit as st
         import matplotlib.pyplot as plt
         from matplotlib.patches import Polygon as MplPolygon
         import numpy as np
+        import pandas as pd
+    except ImportError as e:
+        print(f"Import error: {e}")
+        return
+    
+    st.markdown("## 🔲 Продвинутая оптимизация раскроя")
+    st.markdown("**Плотная упаковка деталей с учетом реальной формы и поворотов.**")
+    
+    if not SHAPELY_AVAILABLE:
+        st.error("❌ Библиотека **shapely** не установлена.\n\nВыполните: `pip install shapely`")
+        return
+    
+    if not objects_data:
+        st.warning("⚠️ Нет данных для оптимизации. Загрузите и обработайте DXF файл.")
+        return
+    
+    st.success(f"✅ Загружено объектов: {len(objects_data)}")
+    
+    # Извлекаем геометрию из DXF объектов
+    with st.spinner('🔍 Анализ геометрии чертежа...'):
+        shapely_geoms = []
+        geometry_info = []
         
-        st.markdown("## 🔲 Продвинутая оптимизация раскроя")
-        st.markdown("**Плотная упаковка деталей с учетом реальной формы и поворотов.**")
-        
-        if not SHAPELY_AVAILABLE:
-            st.error("❌ Библиотека **shapely** не установлена.\n\nВыполните: `pip install shapely`")
-            return
-        
-        if not objects_data:
-            st.warning("⚠️ Нет данных для оптимизации. Загрузите и обработайте DXF файл.")
-            return
-        
-        st.success(f"✅ Загружено объектов: {len(objects_data)}")
-        
-        # Извлекаем геометрию из DXF объектов
-        with st.spinner('🔍 Анализ геометрии чертежа...'):
-            shapely_geoms = []
-            geometry_info = []
-            
-            for i, obj in enumerate(objects_data):
-                geom = dxf_object_to_shapely(obj)
-                if geom is not None:
-                    shapely_geoms.append(geom)
-                    bounds = geom.bounds
-                    geometry_info.append({
-                        'index': i + 1,
-                        'type': get_polygon_type(geom),
-                        'width': bounds[2] - bounds[0],
-                        'height': bounds[3] - bounds[1],
-                        'area': geom.area
-                    })
-        
-        if not shapely_geoms:
-            st.error("❌ Не удалось определить геометрию ни одного объекта.")
-            return
-        
-        # Отображаем информацию об объектах
-        st.markdown("### 📐 Доступные объекты")
-        
+        for i, obj in enumerate(objects_data):
+            geom = dxf_object_to_shapely(obj)
+            if geom is not None:
+                shapely_geoms.append(geom)
+                bounds = geom.bounds
+                geometry_info.append({
+                    'index': i + 1,
+                    'type': get_polygon_type(geom),
+                    'width': bounds[2] - bounds[0],
+                    'height': bounds[3] - bounds[1],
+                    'area': geom.area
+                })
+    
+    if not shapely_geoms:
+        st.error("❌ Не удалось определить геометрию ни одного объекта.")
+        return
+    
+    # Отображаем информацию об объектах
+    st.markdown("### 📐 Доступные объекты")
+    
+    if geometry_info:
         df_info = pd.DataFrame(geometry_info)
         df_info.columns = ['№', 'Тип', 'Ширина (мм)', 'Высота (мм)', 'Площадь (мм²)']
         st.dataframe(df_info, use_container_width=True, hide_index=True)
+    
+    # Выбор детали для раскроя
+    st.markdown("### 🎯 Выбор детали")
+    
+    selected_idx = st.selectbox(
+        "Выберите объект для раскроя:",
+        options=range(len(shapely_geoms)),
+        format_func=lambda i: f"Объект #{i+1} — {geometry_info[i]['type']} ({geometry_info[i]['width']:.1f}×{geometry_info[i]['height']:.1f} мм)"
+    )
+    
+    selected_geom = shapely_geoms[selected_idx]
+    bounds = selected_geom.bounds
+    geom_width = bounds[2] - bounds[0]
+    geom_height = bounds[3] - bounds[1]
+    geom_area = selected_geom.area
+    
+    # Отображаем информацию о выбранной детали
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Тип", geometry_info[selected_idx]['type'])
+    with col2:
+        st.metric("Ширина", f"{geom_width:.2f} мм")
+    with col3:
+        st.metric("Высота", f"{geom_height:.2f} мм")
+    with col4:
+        st.metric("Площадь", f"{geom_area/1e6:.4f} м²")
+    
+    # Предпросмотр геометрии
+    with st.expander("🔍 Предпросмотр геометрии", expanded=False):
+        fig, ax = plt.subplots(figsize=(10, 8))
+        fig.patch.set_facecolor('#FFFFFF')
+        ax.set_facecolor('#F8F8F8')
         
-        # Выбор детали для раскроя
-        st.markdown("### 🎯 Выбор детали")
+        coords = list(selected_geom.exterior.coords)
+        if len(coords) > 2:
+            polygon = MplPolygon(
+                coords,
+                linewidth=2, edgecolor='#0000FF', facecolor='#ADD8E6', alpha=0.7
+            )
+            ax.add_patch(polygon)
         
-        selected_idx = st.selectbox(
-            "Выберите объект для раскроя:",
-            options=range(len(shapely_geoms)),
-            format_func=lambda i: f"Объект #{i+1} — {geometry_info[i]['type']} ({geometry_info[i]['width']:.1f}×{geometry_info[i]['height']:.1f} мм)"
+        ax.set_aspect('equal')
+        ax.grid(True, alpha=0.3)
+        ax.set_title(f"Геометрия детали", fontsize=14, fontweight='bold')
+        ax.set_xlabel('X (мм)')
+        ax.set_ylabel('Y (мм)')
+        
+        margin = max(geom_width, geom_height) * 0.1
+        ax.set_xlim(bounds[0] - margin, bounds[2] + margin)
+        ax.set_ylim(bounds[1] - margin, bounds[3] + margin)
+        
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+    
+    st.markdown("---")
+    
+    # Параметры раскроя
+    st.markdown("### ⚙️ Параметры раскроя")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.markdown("**Параметры листа материала:**")
+        sheet_width = st.number_input(
+            "Ширина листа (мм)",
+            min_value=100.0, max_value=10000.0,
+            value=3000.0, step=100.0
         )
-        
-        selected_geom = shapely_geoms[selected_idx]
-        bounds = selected_geom.bounds
-        geom_width = bounds[2] - bounds[0]
-        geom_height = bounds[3] - bounds[1]
-        geom_area = selected_geom.area
-        
-        # Отображаем информацию о выбранной детали
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("Тип", geometry_info[selected_idx]['type'])
-        with col2:
-            st.metric("Ширина", f"{geom_width:.2f} мм")
-        with col3:
-            st.metric("Высота", f"{geom_height:.2f} мм")
-        with col4:
-            st.metric("Площадь", f"{geom_area/1e6:.4f} м²")
-        
-        # Предпросмотр геометрии
-        with st.expander("🔍 Предпросмотр геометрии", expanded=False):
-            fig, ax = plt.subplots(figsize=(10, 8))
-            fig.patch.set_facecolor('#FFFFFF')
-            ax.set_facecolor('#F8F8F8')
-            
-            coords = list(selected_geom.exterior.coords)
-            if len(coords) > 2:
-                polygon = MplPolygon(
-                    coords,
-                    linewidth=2, edgecolor='#0000FF', facecolor='#ADD8E6', alpha=0.7
+        sheet_height = st.number_input(
+            "Высота листа (мм)",
+            min_value=100.0, max_value=10000.0,
+            value=1500.0, step=100.0
+        )
+    
+    with col2:
+        st.markdown("**Настройки размещения:**")
+        quantity = st.number_input(
+            "Количество деталей",
+            min_value=1, max_value=500,
+            value=20, step=1
+        )
+        spacing = st.number_input(
+            "Минимальный отступ (мм)",
+            min_value=0.0, max_value=50.0,
+            value=5.0, step=1.0
+        )
+        rotation_step = st.slider(
+            "Точность поворота (°)",
+            min_value=15.0, max_value=90.0,
+            value=45.0, step=15.0
+        )
+    
+    st.markdown("---")
+    
+    # Кнопка запуска
+    if st.button("🚀 Запустить оптимизацию", type="primary", use_container_width=True):
+        with st.spinner(f'⏳ Оптимизация размещения {quantity} деталей...'):
+            try:
+                optimizer = AdvancedNestingOptimizer(
+                    sheet_width, sheet_height, spacing, rotation_step
                 )
-                ax.add_patch(polygon)
-            
-            ax.set_aspect('equal')
-            ax.grid(True, alpha=0.3)
-            ax.set_title(f"Геометрия детали", fontsize=14, fontweight='bold')
-            ax.set_xlabel('X (мм)')
-            ax.set_ylabel('Y (мм)')
-            
-            margin = max(geom_width, geom_height) * 0.1
-            ax.set_xlim(bounds[0] - margin, bounds[2] + margin)
-            ax.set_ylim(bounds[1] - margin, bounds[3] + margin)
-            
-            st.pyplot(fig, use_container_width=True)
-            plt.close(fig)
+                
+                result = optimizer.optimize(selected_geom, quantity)
+                
+                st.session_state['nesting_result'] = result
+                
+                st.success("✅ Оптимизация завершена!")
+                st.balloons()
+                
+            except Exception as e:
+                st.error(f"❌ Ошибка при оптимизации: {e}")
+                logger.exception("Optimization error")
+                st.exception(e)
+                return
+    
+    # Отображение результатов
+    if 'nesting_result' in st.session_state:
+        result = st.session_state['nesting_result']
+        
+        st.markdown("---")
+        st.markdown("### 📊 Результаты оптимизации")
+        
+        # Общая статистика
+        col_r1, col_r2, col_r3, col_r4, col_r5 = st.columns(5)
+        
+        with col_r1:
+            st.metric("📄 Листов", len(result.sheets))
+        with col_r2:
+            st.metric("✅ Размещено", f"{result.parts_placed}/{result.total_parts}")
+        with col_r3:
+            st.metric("❌ Не поместилось", result.parts_not_placed)
+        with col_r4:
+            st.metric("📈 Эффективность", f"{result.average_efficiency:.1f}%")
+        with col_r5:
+            total_waste_m2 = result.total_waste / 1e6
+            st.metric("♻️ Отходы", f"{total_waste_m2:.2f} м²")
+        
+        st.info(f"**Алгоритм:** {result.algorithm_used}")
+        
+        if result.parts_not_placed > 0:
+            st.warning(f"⚠️ **{result.parts_not_placed}** деталей не поместились! Увеличьте размер листа или уменьшите количество.")
         
         st.markdown("---")
         
-        # Параметры раскроя
-        st.markdown("### ⚙️ Параметры раскроя")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("**Параметры листа материала:**")
-            sheet_width = st.number_input(
-                "Ширина листа (мм)",
-                min_value=100.0, max_value=10000.0,
-                value=3000.0, step=100.0
-            )
-            sheet_height = st.number_input(
-                "Высота листа (мм)",
-                min_value=100.0, max_value=10000.0,
-                value=1500.0, step=100.0
-            )
-        
-        with col2:
-            st.markdown("**Настройки размещения:**")
-            quantity = st.number_input(
-                "Количество деталей",
-                min_value=1, max_value=500,
-                value=20, step=1
-            )
-            spacing = st.number_input(
-                "Минимальный отступ (мм)",
-                min_value=0.0, max_value=50.0,
-                value=5.0, step=1.0
-            )
-            rotation_step = st.slider(
-                "Точность поворота (°)",
-                min_value=15.0, max_value=90.0,
-                value=45.0, step=15.0
-            )
-        
-        st.markdown("---")
-        
-        # Кнопка запуска
-        if st.button("🚀 Запустить оптимизацию", type="primary", use_container_width=True):
-            with st.spinner(f'⏳ Оптимизация размещения {quantity} деталей...'):
-                try:
-                    optimizer = AdvancedNestingOptimizer(
-                        sheet_width, sheet_height, spacing, rotation_step
-                    )
-                    
-                    result = optimizer.optimize(selected_geom, quantity)
-                    
-                    st.session_state['nesting_result'] = result
-                    
-                    st.success("✅ Оптимизация завершена!")
-                    st.balloons()
-                    
-                except Exception as e:
-                    st.error(f"❌ Ошибка при оптимизации: {e}")
-                    logger.exception("Optimization error")
-                    st.exception(e)
-                    return
-        
-        # Отображение результатов
-        if 'nesting_result' in st.session_state:
-            result = st.session_state['nesting_result']
+        # Сводка по листам
+        if result.sheets:
+            st.markdown("### 📋 Сводка по листам")
             
-            st.markdown("---")
-            st.markdown("### 📊 Результаты оптимизации")
+            summary_rows = []
+            for sheet in result.sheets:
+                summary_rows.append({
+                    'Лист №': sheet.sheet_number,
+                    'Деталей': len(sheet.parts),
+                    'Использовано (м²)': round(sheet.used_area / 1e6, 4),
+                    'Отходы (м²)': round(sheet.waste_area / 1e6, 4),
+                    'Эффективность (%)': round(sheet.efficiency, 2)
+                })
             
-            # Общая статистика
-            col_r1, col_r2, col_r3, col_r4, col_r5 = st.columns(5)
+            if summary_rows:
+                df_summary = pd.DataFrame(summary_rows)
+                st.dataframe(df_summary, use_container_width=True, hide_index=True)
             
-            with col_r1:
-                st.metric("📄 Листов", len(result.sheets))
-            with col_r2:
-                st.metric("✅ Размещено", f"{result.parts_placed}/{result.total_parts}")
-            with col_r3:
-                st.metric("❌ Не поместилось", result.parts_not_placed)
-            with col_r4:
-                st.metric("📈 Эффективность", f"{result.average_efficiency:.1f}%")
-            with col_r5:
-                total_waste_m2 = result.total_waste / 1e6
-                st.metric("♻️ Отходы", f"{total_waste_m2:.2f} м²")
+            # Визуализация
+            st.markdown("### 🎨 Визуализация раскроя")
             
-            st.info(f"**Алгоритм:** {result.algorithm_used}")
+            if len(result.sheets) > 1:
+                sheet_to_view = st.selectbox(
+                    "Выберите лист для просмотра:",
+                    options=range(len(result.sheets)),
+                    format_func=lambda x: f"Лист #{x + 1} ({len(result.sheets[x].parts)} деталей, {result.sheets[x].efficiency:.1f}%)"
+                )
+            else:
+                sheet_to_view = 0
             
-            if result.parts_not_placed > 0:
-                st.warning(f"⚠️ **{result.parts_not_placed}** деталей не поместились! Увеличьте размер листа или уменьшите количество.")
-            
-            st.markdown("---")
-            
-            # Сводка по листам
-            if result.sheets:
-                st.markdown("### 📋 Сводка по листам")
-                
-                summary_rows = []
-                for sheet in result.sheets:
-                    summary_rows.append({
-                        'Лист №': sheet.sheet_number,
-                        'Деталей': len(sheet.parts),
-                        'Использовано (м²)': round(sheet.used_area / 1e6, 4),
-                        'Отходы (м²)': round(sheet.waste_area / 1e6, 4),
-                        'Эффективность (%)': round(sheet.efficiency, 2)
-                    })
-                
-                st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
-                
-                # Визуализация
-                st.markdown("### 🎨 Визуализация раскроя")
-                
-                if len(result.sheets) > 1:
-                    sheet_to_view = st.selectbox(
-                        "Выберите лист для просмотра:",
-                        options=range(len(result.sheets)),
-                        format_func=lambda x: f"Лист #{x + 1} ({len(result.sheets[x].parts)} деталей, {result.sheets[x].efficiency:.1f}%)"
-                    )
-                else:
-                    sheet_to_view = 0
-                
+            if sheet_to_view < len(result.sheets):
                 sheet = result.sheets[sheet_to_view]
                 
                 # Создаем визуализацию
@@ -842,10 +851,11 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                 ax.set_facecolor('#F8F8F8')
                 
                 # Границы листа
-                ax.add_patch(MplPolygon(
+                sheet_rect = MplPolygon(
                     [(0, 0), (sheet.width, 0), (sheet.width, sheet.height), (0, sheet.height)],
                     fill=False, edgecolor='#FF0000', linewidth=3, linestyle='--'
-                ))
+                )
+                ax.add_patch(sheet_rect)
                 
                 if not sheet.parts:
                     ax.text(sheet.width/2, sheet.height/2, 'Нет деталей', 
@@ -855,6 +865,40 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                     
                     for i, part in enumerate(sheet.parts):
                         coords = list(part.geometry.exterior.coords)
-                        ax.add_patch(MplPolygon(
-                            coords, facecolor=colors[i], edgecolor='darkblue', 
-                            alpha=0.7, linewidth=1
+                        if len(coords) > 2:
+                            polygon = MplPolygon(
+                                coords, 
+                                facecolor=colors[i % len(colors)], 
+                                edgecolor='darkblue', 
+                                alpha=0.7, 
+                                linewidth=1.5
+                            )
+                            ax.add_patch(polygon)
+                            
+                            # Добавляем номер детали
+                            centroid = part.geometry.centroid
+                            ax.text(centroid.x, centroid.y, str(part.part_id),
+                                   ha='center', va='center', fontsize=9, fontweight='bold',
+                                   bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                
+                ax.set_xlim(-50, sheet.width + 50)
+                ax.set_ylim(-50, sheet.height + 50)
+                ax.set_aspect('equal')
+                ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+                ax.set_title(f"Лист #{sheet.sheet_number} — {len(sheet.parts)} деталей — Эффективность: {sheet.efficiency:.1f}%", 
+                           fontsize=14, fontweight='bold', pad=15)
+                ax.set_xlabel("X (мм)", fontsize=11)
+                ax.set_ylabel("Y (мм)", fontsize=11)
+                
+                plt.tight_layout()
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+
+
+# ---------------------------------------------------------------------------
+# Точка входа для тестирования
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("Модуль оптимизации раскроя загружен успешно")
+    print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
