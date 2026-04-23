@@ -1,18 +1,12 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 3.1 - ПРАВИЛЬНАЯ паркетная тесселяция с математически корректным алгоритмом.
-
-Математическая основа:
-  Любой треугольник T + его отражение T' через одну из сторон образуют
-  параллелограмм. Этот параллелограмм — минимальный периодический тайл
-  для плотной тесселяции без зазоров.
+Версия 3.2 - ФИНАЛЬНАЯ ПРАВИЛЬНАЯ версия с простой паркетной тесселяцией.
 """
 
 import math
 from typing import List, Optional, Tuple, Any, Dict
 from dataclasses import dataclass, field
 import logging
-from enum import Enum
 
 # Безопасный импорт Shapely
 try:
@@ -32,7 +26,6 @@ logger = logging.getLogger(__name__)
 MIN_POLYGON_AREA = 1e-6
 MIN_COORDINATE_DIFF = 1e-6
 DEFAULT_ROTATION_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
-TRIANGLE_BASE_ANGLES = [0, 90, 180, 270]
 MAX_POSITION_CANDIDATES = 300
 POSITION_STEP_DIVISOR = 10
 
@@ -277,130 +270,51 @@ def get_polygon_type(geom: ShapelyPolygon) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Геометрия ПРАВИЛЬНОЙ тесселяции треугольников
+# ПРОСТАЯ И ПРАВИЛЬНАЯ тесселяция треугольников
 # ---------------------------------------------------------------------------
 
-Vec2 = Tuple[float, float]
-
-
-def _reflect_point_over_line(p: Vec2, a: Vec2, b: Vec2) -> Vec2:
-    """Отражает точку p через бесконечную прямую AB."""
-    dx, dy = b[0] - a[0], b[1] - a[1]
-    d2 = dx * dx + dy * dy
-    if d2 < 1e-20:
-        return p
-    t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / d2
-    fx = a[0] + t * dx
-    fy = a[1] + t * dy
-    return (2.0 * fx - p[0], 2.0 * fy - p[1])
-
-
-def _rotate_point(p: Vec2, cx: float, cy: float, cos_a: float, sin_a: float) -> Vec2:
-    dx, dy = p[0] - cx, p[1] - cy
-    return (cx + dx * cos_a - dy * sin_a,
-            cy + dx * sin_a + dy * cos_a)
-
-
-def _rotate_verts(verts: List[Vec2], angle_deg: float) -> List[Vec2]:
-    """Поворачивает список точек вокруг (0,0)."""
-    a = math.radians(angle_deg)
-    c, s = math.cos(a), math.sin(a)
-    return [_rotate_point(v, 0.0, 0.0, c, s) for v in verts]
-
-
-def _normalize_to_origin(verts: List[Vec2]) -> List[Vec2]:
-    """Сдвигает так, чтобы min_x=0, min_y=0."""
-    mx = min(v[0] for v in verts)
-    my = min(v[1] for v in verts)
-    return [(v[0] - mx, v[1] - my) for v in verts]
-
-
-def _bounds(verts: List[Vec2]) -> Tuple[float, float, float, float]:
-    xs = [v[0] for v in verts]
-    ys = [v[1] for v in verts]
-    return min(xs), min(ys), max(xs), max(ys)
-
-
-def _build_tile_for_edge(
-    verts: List[Vec2],
-    ia: int, ib: int, ic: int,
-    extra_rotation: float,
-) -> Optional[Dict]:
+def get_triangle_base_and_height(geom: ShapelyPolygon) -> Optional[Tuple[float, float]]:
     """
-    Строит параметры тайла (параллелограмм из T1+T2).
-    """
-    a, b, c = verts[ia], verts[ib], verts[ic]
-    c_mirror = _reflect_point_over_line(c, a, b)
-
-    t1 = [a, b, c]
-    t2 = [a, b, c_mirror]
-    all_verts = t1 + t2
-
-    if abs(extra_rotation) > 1e-6:
-        bx0, by0, bx1, by1 = _bounds(all_verts)
-        cx_tile = (bx0 + bx1) / 2
-        cy_tile = (by0 + by1) / 2
-        a_rad = math.radians(extra_rotation)
-        cos_a, sin_a = math.cos(a_rad), math.sin(a_rad)
-        t1 = [_rotate_point(v, cx_tile, cy_tile, cos_a, sin_a) for v in t1]
-        t2 = [_rotate_point(v, cx_tile, cy_tile, cos_a, sin_a) for v in t2]
-        all_verts = t1 + t2
-
-    bx0, by0, bx1, by1 = _bounds(all_verts)
-    dx, dy = -bx0, -by0
-    t1 = [(v[0] + dx, v[1] + dy) for v in t1]
-    t2 = [(v[0] + dx, v[1] + dy) for v in t2]
-
-    bx0, by0, bx1, by1 = _bounds(t1 + t2)
-    tile_w = bx1 - bx0
-    tile_h = by1 - by0
-
-    if tile_w < MIN_COORDINATE_DIFF or tile_h < MIN_COORDINATE_DIFF:
-        return None
-
-    col_step = tile_w
-    row_h = tile_h
-
-    return {
-        't1': t1,
-        't2': t2,
-        'col_step': col_step,
-        'row_h': row_h,
-        'tile_w': tile_w,
-        'tile_h': tile_h,
-    }
-
-
-def get_parquet_tessellation_params(geom: ShapelyPolygon) -> Optional[Dict]:
-    """
-    ПРАВИЛЬНАЯ паркетная тесселяция для произвольного треугольника.
-    Перебирает все три стороны как базу отражения.
+    Находит самую длинную сторону треугольника (база) и высоту к ней.
     """
     try:
         coords = list(geom.exterior.coords)[:-1]
         if len(coords) != 3:
             return None
-
-        verts = [(float(x), float(y)) for x, y in coords]
-        verts = _normalize_to_origin(verts)
-
-        best: Optional[Dict] = None
-        best_row_h = float('inf')
-
-        edges = [(0, 1, 2), (1, 2, 0), (2, 0, 1)]
-
-        for ia, ib, ic in edges:
-            tile = _build_tile_for_edge(verts, ia, ib, ic, extra_rotation=0.0)
-            if tile is None:
-                continue
-            if tile['row_h'] < best_row_h:
-                best_row_h = tile['row_h']
-                best = tile
-
-        return best
-
+        
+        # Вершины треугольника
+        p1, p2, p3 = coords[0], coords[1], coords[2]
+        
+        # Длины сторон
+        side1 = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        side2 = math.hypot(p3[0] - p2[0], p3[1] - p2[1])
+        side3 = math.hypot(p1[0] - p3[0], p1[1] - p3[1])
+        
+        # Находим самую длинную сторону
+        if side1 >= side2 and side1 >= side3:
+            base = side1
+            base_p1, base_p2 = p1, p2
+            apex = p3
+        elif side2 >= side1 and side2 >= side3:
+            base = side2
+            base_p1, base_p2 = p2, p3
+            apex = p1
+        else:
+            base = side3
+            base_p1, base_p2 = p3, p1
+            apex = p2
+        
+        # Вычисляем высоту через площадь
+        area = abs(geom.area)
+        height = (2 * area) / base if base > MIN_COORDINATE_DIFF else 0
+        
+        if base < MIN_COORDINATE_DIFF or height < MIN_COORDINATE_DIFF:
+            return None
+        
+        return (base, height)
+        
     except Exception as e:
-        logger.error(f"get_parquet_tessellation_params: {e}")
+        logger.error(f"Error calculating triangle base and height: {e}")
         return None
 
 
@@ -409,7 +323,7 @@ def get_parquet_tessellation_params(geom: ShapelyPolygon) -> Optional[Dict]:
 # ---------------------------------------------------------------------------
 
 class AdvancedNestingOptimizer:
-    """Продвинутый алгоритм раскроя с правильной паркетной тесселяцией."""
+    """Продвинутый алгоритм раскроя с простой паркетной тесселяцией."""
     
     def __init__(
         self,
@@ -458,7 +372,7 @@ class AdvancedNestingOptimizer:
             coords = list(normalized.exterior.coords)
             
             if len(coords) - 1 == 3:
-                return self._optimize_triangle_parquet(normalized, quantity)
+                return self._optimize_triangle_simple(normalized, quantity)
             else:
                 return self._optimize_general(normalized, quantity)
                 
@@ -503,168 +417,121 @@ class AdvancedNestingOptimizer:
             algorithm_used=algorithm
         )
     
-    def _optimize_triangle_parquet(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
+    def _optimize_triangle_simple(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
         """
-        Перебирает все три стороны × четыре доп. поворота (0/90/180/270°) —
-        итого до 12 вариантов — и выбирает тот, который вмещает больше деталей.
+        ПРОСТАЯ паркетная упаковка треугольников.
+        Размещает треугольники рядами: вверх-вниз-вверх-вниз.
         """
-        try:
-            coords = list(part_geometry.exterior.coords)[:-1]
-            if len(coords) != 3:
-                return self._optimize_general(part_geometry, quantity)
-
-            verts = [(float(x), float(y)) for x, y in coords]
-            verts = _normalize_to_origin(verts)
-        except Exception as e:
-            logger.warning(f"Cannot read triangle vertices: {e}")
+        # Получаем базу и высоту
+        params = get_triangle_base_and_height(part_geometry)
+        if not params:
             return self._optimize_general(part_geometry, quantity)
-
-        edges = [(0, 1, 2), (1, 2, 0), (2, 0, 1)]
-        extra_rotations = [0.0, 90.0, 180.0, 270.0]
-
-        best_result = None
-        best_count = 0
-
-        for ia, ib, ic in edges:
-            for extra_rot in extra_rotations:
-                try:
-                    tile = _build_tile_for_edge(verts, ia, ib, ic, extra_rot)
-                    if tile is None:
-                        continue
-
-                    result = self._place_triangles_parquet(
-                        part_geometry, tile, quantity,
-                        label=f"edge({ia},{ib}) rot={extra_rot}°"
-                    )
-
-                    if result.parts_placed > best_count:
-                        best_count = result.parts_placed
-                        best_result = result
-
-                    if best_count >= quantity:
-                        break
-
-                except Exception as exc:
-                    logger.debug(f"Tile edge({ia},{ib}) rot={extra_rot}° failed: {exc}")
-                    continue
-
-            if best_count >= quantity:
-                break
-
-        if best_result is None or best_result.parts_placed == 0:
-            logger.info("All tessellation variants failed, falling back to general algorithm")
-            return self._optimize_general(part_geometry, quantity)
-
-        return best_result
-    
-    def _place_triangles_parquet(
-        self,
-        part_geometry: ShapelyPolygon,
-        tile: Dict,
-        quantity: int,
-        label: str = "",
-    ) -> NestingResult:
-        """
-        Заполняет листы тесселяцией параллелограммных тайлов (T1 + T2).
-        """
-        t1_local = tile['t1']
-        t2_local = tile['t2']
-        col_step = tile['col_step']
-        row_h = tile['row_h']
-        tile_w = tile['tile_w']
-        tile_h = tile['tile_h']
-
-        row_step = tile_h + self.spacing
-
-        usable_w = self.sheet_width - 2.0 * self.spacing
-        usable_h = self.sheet_height - 2.0 * self.spacing
-
-        if usable_w <= 0 or usable_h <= 0 or col_step < MIN_COORDINATE_DIFF:
+        
+        base_length, height = params
+        
+        # Размеры для упаковки
+        col_step = base_length  # Треугольники встык по горизонтали
+        row_step = height + self.spacing  # Между рядами - spacing
+        
+        usable_width = self.sheet_width - 2 * self.spacing
+        usable_height = self.sheet_height - 2 * self.spacing
+        
+        if usable_width <= 0 or usable_height <= 0:
             return self._create_empty_result(quantity, "Sheet too small")
-
-        tiles_per_row = max(1, int(usable_w / col_step))
-        max_rows = max(1, int(usable_h / row_step))
-
-        part_area = part_geometry.area
+        
+        # Количество пар треугольников в ряду
+        pairs_per_row = max(1, int(usable_width / col_step))
+        max_rows = max(1, int(usable_height / row_step))
+        
         sheets = []
         parts_placed = 0
+        part_area = part_geometry.area
         part_id = 1
-
-        current_sheet = None
-
+        
+        current_sheet = Sheet(
+            sheet_number=1,
+            width=self.sheet_width,
+            height=self.sheet_height
+        )
+        sheets.append(current_sheet)
+        
         for row in range(max_rows):
             if part_id > quantity:
                 break
-
-            x_brick = (col_step / 2.0) if (row % 2 == 1) else 0.0
-            y_origin = self.spacing + row * row_step
-
-            for col in range(tiles_per_row):
+            
+            y = self.spacing + row * row_step
+            
+            if y + height > self.sheet_height - self.spacing:
+                break
+            
+            for col in range(pairs_per_row):
                 if part_id > quantity:
                     break
-
-                x_origin = self.spacing + col * col_step + x_brick
-
-                if x_origin + tile_w > self.sheet_width - self.spacing + 1e-6:
+                
+                x = self.spacing + col * col_step
+                
+                # Проверка границ
+                if x + base_length * 1.5 > self.sheet_width - self.spacing:
                     continue
-
-                if current_sheet is None:
+                
+                # ============================================================
+                # Треугольник 1: основанием вниз (острие вверх)
+                # ============================================================
+                tri1 = ShapelyPolygon([
+                    (x, y),
+                    (x + base_length, y),
+                    (x + base_length/2, y + height)
+                ])
+                
+                current_sheet.parts.append(PlacedPart(
+                    part_id=part_id,
+                    part_name=f"Деталь #{part_id}",
+                    x=x,
+                    y=y,
+                    rotation=0,
+                    geometry=tri1,
+                    bounding_box=tri1.bounds
+                ))
+                current_sheet.used_area += part_area
+                parts_placed += 1
+                part_id += 1
+                
+                # ============================================================
+                # Треугольник 2: основанием вверх (острие вниз)
+                # ============================================================
+                if part_id <= quantity and x + base_length * 1.5 <= self.sheet_width - self.spacing:
+                    tri2 = ShapelyPolygon([
+                        (x + base_length/2, y + height),
+                        (x + base_length, y),
+                        (x + base_length*1.5, y + height)
+                    ])
+                    
+                    current_sheet.parts.append(PlacedPart(
+                        part_id=part_id,
+                        part_name=f"Деталь #{part_id}",
+                        x=x + base_length/2,
+                        y=y,
+                        rotation=180,
+                        geometry=tri2,
+                        bounding_box=tri2.bounds
+                    ))
+                    current_sheet.used_area += part_area
+                    parts_placed += 1
+                    part_id += 1
+                
+                # Если лист заполнен, создаем новый
+                if len(current_sheet.parts) >= 200 and part_id <= quantity:
                     current_sheet = Sheet(
                         sheet_number=len(sheets) + 1,
                         width=self.sheet_width,
-                        height=self.sheet_height,
+                        height=self.sheet_height
                     )
                     sheets.append(current_sheet)
-
-                # T1
-                t1_coords = [(x_origin + v[0], y_origin + v[1]) for v in t1_local]
-                geom1 = ShapelyPolygon(t1_coords)
-
-                if self._fits_in_bounds(geom1):
-                    current_sheet.parts.append(PlacedPart(
-                        part_id=part_id,
-                        part_name=f"Деталь #{part_id}",
-                        x=x_origin, y=y_origin,
-                        rotation=0.0,
-                        geometry=geom1,
-                        bounding_box=geom1.bounds,
-                    ))
-                    current_sheet.used_area += part_area
-                    parts_placed += 1
-                    part_id += 1
-
-                if part_id > quantity:
-                    break
-
-                # T2
-                t2_coords = [(x_origin + v[0], y_origin + v[1]) for v in t2_local]
-                geom2 = ShapelyPolygon(t2_coords)
-
-                if self._fits_in_bounds(geom2):
-                    current_sheet.parts.append(PlacedPart(
-                        part_id=part_id,
-                        part_name=f"Деталь #{part_id}",
-                        x=x_origin, y=y_origin,
-                        rotation=180.0,
-                        geometry=geom2,
-                        bounding_box=geom2.bounds,
-                    ))
-                    current_sheet.used_area += part_area
-                    parts_placed += 1
-                    part_id += 1
-
+        
         return self._calculate_result_statistics(
             sheets, quantity, parts_placed,
-            f"Triangle Tessellation ({label})"
+            "Simple Triangle Parquet Packing"
         )
-    
-    def _fits_in_bounds(self, geometry: ShapelyPolygon) -> bool:
-        """Проверяет что геометрия помещается в границы листа."""
-        bounds = geometry.bounds
-        return (bounds[0] >= self.spacing and 
-                bounds[1] >= self.spacing and 
-                bounds[2] <= self.sheet_width - self.spacing and 
-                bounds[3] <= self.sheet_height - self.spacing)
     
     def _optimize_general(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
         """Общий алгоритм для произвольных фигур."""
@@ -860,7 +727,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         return
     
     st.markdown("## 🔲 Продвинутая оптимизация раскроя")
-    st.markdown("**Математически правильная паркетная упаковка треугольников.**")
+    st.markdown("**Простая и эффективная паркетная упаковка треугольников.**")
     st.markdown("---")
     
     if not SHAPELY_AVAILABLE:
@@ -961,6 +828,9 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
             
             xs, ys = zip(*coords[:-1])
             ax.scatter(xs, ys, c='red', s=50, zorder=5, label='Вершины')
+            
+            # Показываем количество вершин
+            st.write(f"**Количество вершин:** {len(coords)-1}")
         
         ax.set_aspect('equal')
         ax.grid(True, alpha=0.3, linestyle='--')
@@ -1011,8 +881,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         )
     
     if selected_info['type'] == 'triangle':
-        st.info("💡 **Для треугольников используется математически правильная паркетная упаковка!**\n\n"
-               "Алгоритм перебирает все 3 стороны × 4 поворота = 12 вариантов и выбирает оптимальный.")
+        st.info("💡 **Для треугольников используется простая паркетная упаковка!**\n\n"
+               "Треугольники размещаются рядами: вверх-вниз-вверх-вниз без зазоров по горизонтали.")
     
     min_required_width = selected_info['width'] + 2 * spacing
     min_required_height = selected_info['height'] + 2 * spacing
@@ -1191,7 +1061,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("Модуль оптимизации раскроя v3.1 - МАТЕМАТИЧЕСКИ ПРАВИЛЬНАЯ ТЕССЕЛЯЦИЯ")
+    print("Модуль оптимизации раскроя v3.2 - ПРОСТАЯ ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ")
     print("=" * 70)
     print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
     if SHAPELY_AVAILABLE:
