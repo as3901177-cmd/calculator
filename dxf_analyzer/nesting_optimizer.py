@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 2.3 - с улучшенным извлечением геометрии из DXF.
+Версия 2.4 - с полной поддержкой POLYLINE из DXF.
 """
 
 import math
@@ -11,7 +11,7 @@ from enum import Enum
 
 # Безопасный импорт Shapely
 try:
-    from shapely.geometry import Polygon as ShapelyPolygon, Point, LineString
+    from shapely.geometry import Polygon as ShapelyPolygon, Point, LineString, MultiPoint
     from shapely.affinity import translate, rotate
     from shapely.strtree import STRtree
     SHAPELY_AVAILABLE = True
@@ -83,13 +83,12 @@ class NestingResult:
 
 
 # ---------------------------------------------------------------------------
-# УЛУЧШЕННАЯ КОНВЕРТАЦИЯ DXF → Shapely
+# КОНВЕРТАЦИЯ DXF → Shapely (улучшенная для POLYLINE)
 # ---------------------------------------------------------------------------
 
 def dxf_object_to_shapely(dxf_obj: Any) -> Optional[ShapelyPolygon]:
     """
-    Улучшенная конвертация DXF объекта в Shapely Polygon.
-    Поддерживает различные форматы DXF объектов.
+    Конвертирует DXF объект (особенно POLYLINE) в Shapely Polygon.
     """
     if not SHAPELY_AVAILABLE or dxf_obj is None:
         return None
@@ -97,77 +96,80 @@ def dxf_object_to_shapely(dxf_obj: Any) -> Optional[ShapelyPolygon]:
     vertices = []
     
     try:
-        # Случай 1: Объект имеет атрибут 'entity' (из ezdxf)
+        # Получаем сущность
         if hasattr(dxf_obj, 'entity'):
             entity = dxf_obj.entity
-            entity_type = entity.dxftype() if hasattr(entity, 'dxftype') else None
-            
-            # POLYLINE
-            if hasattr(entity, 'vertices'):
-                for v in entity.vertices:
-                    if hasattr(v, 'dxf'):
-                        vertices.append((float(v.dxf.x), float(v.dxf.y)))
-                    elif hasattr(v, 'x') and hasattr(v, 'y'):
-                        vertices.append((float(v.x), float(v.y)))
-            
-            # LWPOLYLINE
-            elif hasattr(entity, 'points'):
-                for p in entity.points():
+        else:
+            entity = dxf_obj
+        
+        # Получаем тип сущности
+        entity_type = None
+        if hasattr(entity, 'dxftype'):
+            entity_type = entity.dxftype()
+        
+        # Для POLYLINE - основной случай
+        if entity_type == 'POLYLINE' or hasattr(entity, 'vertices'):
+            # Обходим все вершины
+            for v in entity.vertices:
+                x = None
+                y = None
+                
+                # Пробуем разные способы получения координат
+                if hasattr(v, 'dxf'):
+                    x = float(v.dxf.x)
+                    y = float(v.dxf.y)
+                elif hasattr(v, 'x') and hasattr(v, 'y'):
+                    x = float(v.x)
+                    y = float(v.y)
+                elif hasattr(v, 'location'):
+                    if hasattr(v.location, 'x'):
+                        x = float(v.location.x)
+                        y = float(v.location.y)
+                elif isinstance(v, (tuple, list)) and len(v) >= 2:
+                    x = float(v[0])
+                    y = float(v[1])
+                elif hasattr(v, 'X') and hasattr(v, 'Y'):
+                    x = float(v.X)
+                    y = float(v.Y)
+                
+                if x is not None and y is not None:
+                    vertices.append((x, y))
+        
+        # Для LWPOLYLINE
+        elif entity_type == 'LWPOLYLINE':
+            if hasattr(entity, 'get_points'):
+                points = entity.get_points('xy')
+                for p in points:
                     if isinstance(p, (tuple, list)) and len(p) >= 2:
                         vertices.append((float(p[0]), float(p[1])))
-                    elif hasattr(p, 'x') and hasattr(p, 'y'):
-                        vertices.append((float(p.x), float(p.y)))
-            
-            # LINE - для линий нужно создать полигон из 4 точек (толщина)
-            elif entity_type == 'LINE':
-                if hasattr(entity, 'dxf'):
-                    start = entity.dxf.start
-                    end = entity.dxf.end
-                    # Создаем прямоугольник толщиной 1мм
-                    thickness = 1.0
-                    vertices = [
-                        (float(start.x), float(start.y)),
-                        (float(end.x), float(end.y)),
-                        (float(end.x + thickness), float(end.y + thickness)),
-                        (float(start.x + thickness), float(start.y + thickness))
-                    ]
-            
-            # CIRCLE
-            elif entity_type == 'CIRCLE':
-                center = entity.dxf.center
-                radius = entity.dxf.radius
-                # Аппроксимируем круг 36-угольником
-                for i in range(36):
-                    angle = i * 10 * math.pi / 180
-                    x = center.x + radius * math.cos(angle)
-                    y = center.y + radius * math.sin(angle)
-                    vertices.append((float(x), float(y)))
+            elif hasattr(entity, 'points'):
+                points = entity.points()
+                for p in points:
+                    if isinstance(p, (tuple, list)) and len(p) >= 2:
+                        vertices.append((float(p[0]), float(p[1])))
         
-        # Случай 2: Прямой доступ к атрибутам
-        elif hasattr(dxf_obj, 'vertices'):
-            for v in dxf_obj.vertices:
-                if hasattr(v, 'dxf'):
-                    vertices.append((float(v.dxf.x), float(v.dxf.y)))
-                elif hasattr(v, 'x') and hasattr(v, 'y'):
-                    vertices.append((float(v.x), float(v.y)))
-        
-        elif hasattr(dxf_obj, 'points'):
-            for p in dxf_obj.points():
+        # Если не нашли вершины через vertices, пробуем points
+        if len(vertices) == 0 and hasattr(entity, 'points'):
+            points = entity.points()
+            for p in points:
                 if isinstance(p, (tuple, list)) and len(p) >= 2:
                     vertices.append((float(p[0]), float(p[1])))
+                elif hasattr(p, 'x') and hasattr(p, 'y'):
+                    vertices.append((float(p.x), float(p.y)))
         
-        # Случай 3: Объект уже является списком точек
-        elif isinstance(dxf_obj, (list, tuple)) and len(dxf_obj) >= 3:
-            for p in dxf_obj:
-                if isinstance(p, (tuple, list)) and len(p) >= 2:
-                    vertices.append((float(p[0]), float(p[1])))
-        
-        # Случай 4: Объект имеет атрибуты x, y (точка)
-        elif hasattr(dxf_obj, 'x') and hasattr(dxf_obj, 'y'):
-            vertices = [(float(dxf_obj.x), float(dxf_obj.y))]
+        # Если всё ещё нет вершин, пробуем get_coords
+        if len(vertices) == 0 and hasattr(entity, 'get_coords'):
+            coords = entity.get_coords()
+            for c in coords:
+                if isinstance(c, (tuple, list)) and len(c) >= 2:
+                    vertices.append((float(c[0]), float(c[1])))
         
         if len(vertices) < 3:
             return None
+        
+        # Замыкаем полигон если нужно
+        if vertices[0] != vertices[-1]:
+            vertices.append(vertices[0])
         
         # Создаем полигон
         poly = ShapelyPolygon(vertices)
@@ -176,28 +178,21 @@ def dxf_object_to_shapely(dxf_obj: Any) -> Optional[ShapelyPolygon]:
         if not poly.is_valid:
             poly = poly.buffer(0)
         
-        # Если после исправления все еще невалидный, создаем bounding box
+        # Если всё ещё невалидный, создаем convex hull
         if not poly.is_valid or poly.is_empty:
-            xs = [v[0] for v in vertices]
-            ys = [v[1] for v in vertices]
-            min_x, max_x = min(xs), max(xs)
-            min_y, max_y = min(ys), max(ys)
-            poly = ShapelyPolygon([
-                (min_x, min_y), (max_x, min_y),
-                (max_x, max_y), (min_x, max_y)
-            ])
+            multi_point = MultiPoint(vertices)
+            poly = multi_point.convex_hull
         
         return poly if not poly.is_empty else None
         
     except Exception as e:
-        logger.error(f"Failed to convert DXF to Shapely: {e}")
+        print(f"Error converting to Shapely: {e}")
         return None
 
 
 def extract_all_geometries(objects_data: List[Any]) -> List[Tuple[int, ShapelyPolygon, dict]]:
     """
     Извлекает все геометрии из списка DXF объектов.
-    Возвращает список кортежей (индекс, геометрия, информация).
     """
     geometries = []
     
@@ -209,26 +204,16 @@ def extract_all_geometries(objects_data: List[Any]) -> List[Tuple[int, ShapelyPo
         
         if geom is not None and not geom.is_empty:
             bounds = geom.bounds
+            coords = list(geom.exterior.coords)
             info = {
                 'index': i,
                 'type': get_polygon_type(geom),
                 'width': bounds[2] - bounds[0],
                 'height': bounds[3] - bounds[1],
                 'area': geom.area,
-                'vertices': len(list(geom.exterior.coords)) - 1
+                'vertices': len(coords) - 1
             }
             geometries.append((i, geom, info))
-            logger.info(f"Extracted geometry from object {i}: {info['type']}, area={info['area']:.2f}")
-        else:
-            logger.warning(f"Could not extract geometry from object {i}")
-            # Выводим информацию об объекте для отладки
-            if hasattr(obj, 'entity'):
-                entity_type = obj.entity.dxftype() if hasattr(obj.entity, 'dxftype') else 'unknown'
-                logger.warning(f"  Object {i} entity type: {entity_type}")
-            elif hasattr(obj, 'dxftype'):
-                logger.warning(f"  Object {i} dxftype: {obj.dxftype()}")
-            else:
-                logger.warning(f"  Object {i} type: {type(obj)}")
     
     return geometries
 
@@ -243,18 +228,16 @@ def get_polygon_type(geom: ShapelyPolygon) -> str:
         num_vertices = len(coords)
         
         if num_vertices == 3:
-            # Проверяем, треугольник ли это
             return "triangle"
         elif num_vertices == 4:
-            # Проверяем, прямоугольник
             bounds = geom.bounds
             rect_area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1])
-            if abs(geom.area - rect_area) / rect_area < 0.05:
+            if rect_area > 0 and abs(geom.area - rect_area) / rect_area < 0.05:
                 return "rectangle"
             else:
                 return "quadrilateral"
         else:
-            return f"polygon_{num_vertices}"
+            return f"polygon"
     except:
         return "unknown"
 
@@ -715,12 +698,14 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         # Показываем отладочную информацию
         with st.expander("🔧 Отладочная информация"):
             st.write("Типы объектов в данных:")
-            for i, obj in enumerate(objects_data[:5]):  # Показываем первые 5
+            for i, obj in enumerate(objects_data[:5]):
                 obj_type = type(obj).__name__
                 st.write(f"  Объект {i}: {obj_type}")
                 if hasattr(obj, 'entity'):
                     if hasattr(obj.entity, 'dxftype'):
                         st.write(f"    Тип DXF: {obj.entity.dxftype()}")
+                    if hasattr(obj.entity, 'vertices'):
+                        st.write(f"    Количество вершин: {len(list(obj.entity.vertices))}")
         return
     
     # Создаем DataFrame с информацией
@@ -856,7 +841,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         if result.sheets:
             st.markdown("### 🎨 Визуализация раскроя")
             
-            for sheet in result.sheets[:3]:  # Показываем первые 3 листа
+            for sheet in result.sheets[:3]:
                 fig, ax = plt.subplots(figsize=(12, 8))
                 fig.patch.set_facecolor('#FFFFFF')
                 ax.set_facecolor('#F8F8F8')
@@ -868,16 +853,18 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                 ))
                 
                 # Детали
-                colors = plt.cm.tab20(np.linspace(0, 1, len(sheet.parts)))
-                for i, part in enumerate(sheet.parts):
-                    coords = list(part.geometry.exterior.coords)
-                    if len(coords) > 2:
-                        ax.add_patch(MplPolygon(
-                            coords, facecolor=colors[i], edgecolor='darkblue', alpha=0.7, linewidth=1
-                        ))
-                        centroid = part.geometry.centroid
-                        ax.text(centroid.x, centroid.y, str(part.part_id),
-                               ha='center', va='center', fontsize=8, fontweight='bold')
+                if sheet.parts:
+                    colors = plt.cm.tab20(np.linspace(0, 1, len(sheet.parts)))
+                    for i, part in enumerate(sheet.parts):
+                        coords = list(part.geometry.exterior.coords)
+                        if len(coords) > 2:
+                            ax.add_patch(MplPolygon(
+                                coords, facecolor=colors[i % len(colors)], 
+                                edgecolor='darkblue', alpha=0.7, linewidth=1
+                            ))
+                            centroid = part.geometry.centroid
+                            ax.text(centroid.x, centroid.y, str(part.part_id),
+                                   ha='center', va='center', fontsize=8, fontweight='bold')
                 
                 ax.set_xlim(-50, sheet.width + 50)
                 ax.set_ylim(-50, sheet.height + 50)
