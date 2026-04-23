@@ -3,7 +3,7 @@
 """
 
 import math
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict, Any
 from dataclasses import dataclass, field
 import logging
 
@@ -574,17 +574,48 @@ class AdvancedNestingOptimizer:
 
 
 # ---------------------------------------------------------------------------
-# Функция для Streamlit (если нужна)
+# Функция для Streamlit
 # ---------------------------------------------------------------------------
 
-def render_nesting_optimizer_tab():
+def render_nesting_optimizer_tab(objects_data: Optional[Dict[str, Any]] = None):
     """
-    Функция-заглушка для интерфейса Streamlit.
-    Замените на реальную реализацию согласно вашему проекту.
+    Функция для отображения вкладки оптимизатора раскроя в Streamlit.
+    
+    Args:
+        objects_data: Данные об объектах для раскроя (опционально)
     """
     try:
         import streamlit as st
+        
         st.write("# Оптимизатор раскроя")
-        st.info("Модуль загружен успешно. Добавьте интерфейс для работы с оптимизатором.")
+        
+        if not SHAPELY_AVAILABLE:
+            st.error("❌ Библиотека Shapely не установлена. Установите: `pip install shapely`")
+            return
+        
+        st.success("✅ Модуль загружен успешно")
+        
+        if objects_data:
+            st.write("### Данные объектов:")
+            st.json(objects_data)
+        else:
+            st.info("Данные объектов не переданы. Используйте интерфейс для загрузки.")
+        
+        # Здесь можно добавить элементы управления для настройки оптимизатора
+        st.write("### Параметры раскроя:")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            sheet_width = st.number_input("Ширина листа (мм)", value=3000.0, min_value=100.0)
+            spacing = st.number_input("Отступ (мм)", value=5.0, min_value=0.0)
+        with col2:
+            sheet_height = st.number_input("Высота листа (мм)", value=1500.0, min_value=100.0)
+            rotation_step = st.number_input("Шаг поворота (°)", value=15.0, min_value=1.0, max_value=90.0)
+        
+        if st.button("Запустить оптимизацию"):
+            st.info("Функция оптимизации будет добавлена позже")
+            
     except ImportError:
         print("Streamlit not available. This is a standalone module.")
+        if objects_data:
+            print(f"Received objects_data: {objects_data}")
