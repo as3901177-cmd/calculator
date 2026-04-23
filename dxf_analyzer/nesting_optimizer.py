@@ -1,10 +1,10 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 2.4 - с полной поддержкой POLYLINE из DXF.
+Версия 2.5 - ИСПРАВЛЕННАЯ ВЕРСИЯ с устранением всех критических ошибок.
 """
 
 import math
-from typing import List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Dict
 from dataclasses import dataclass, field
 import logging
 from enum import Enum
@@ -14,6 +14,7 @@ try:
     from shapely.geometry import Polygon as ShapelyPolygon, Point, LineString, MultiPoint
     from shapely.affinity import translate, rotate
     from shapely.strtree import STRtree
+    from shapely.validation import make_valid
     SHAPELY_AVAILABLE = True
 except ImportError:
     SHAPELY_AVAILABLE = False
@@ -21,6 +22,14 @@ except ImportError:
     print("Warning: shapely is not installed. Run: pip install shapely")
 
 logger = logging.getLogger(__name__)
+
+# Константы
+MIN_POLYGON_AREA = 1e-6
+MIN_COORDINATE_DIFF = 1e-6
+DEFAULT_ROTATION_ANGLES = [0, 45, 90, 135, 180, 225, 270, 315]
+TRIANGLE_BASE_ANGLES = [0, 90, 180, 270]
+MAX_POSITION_CANDIDATES = 300
+POSITION_STEP_DIVISOR = 10
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +67,13 @@ class Sheet:
     spatial_index: Optional[Any] = None
     
     def rebuild_spatial_index(self):
+        """Перестраивает пространственный индекс для быстрого поиска пересечений."""
         if self.parts and SHAPELY_AVAILABLE:
-            self.spatial_index = STRtree([p.geometry for p in self.parts])
+            try:
+                self.spatial_index = STRtree([p.geometry for p in self.parts])
+            except Exception as e:
+                logger.warning(f"Failed to build spatial index: {e}")
+                self.spatial_index = None
     
     @property
     def total_area(self) -> float:
@@ -83,12 +97,13 @@ class NestingResult:
 
 
 # ---------------------------------------------------------------------------
-# КОНВЕРТАЦИЯ DXF → Shapely (улучшенная для POLYLINE)
+# КОНВЕРТАЦИЯ DXF → Shapely (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # ---------------------------------------------------------------------------
 
 def dxf_object_to_shapely(dxf_obj: Any) -> Optional[ShapelyPolygon]:
     """
     Конвертирует DXF объект (особенно POLYLINE) в Shapely Polygon.
+    ИСПРАВЛЕНО: обработка генераторов, удаление дубликатов, валидация.
     """
     if not SHAPELY_AVAILABLE or dxf_obj is None:
         return None
@@ -97,123 +112,184 @@ def dxf_object_to_shapely(dxf_obj: Any) -> Optional[ShapelyPolygon]:
     
     try:
         # Получаем сущность
-        if hasattr(dxf_obj, 'entity'):
-            entity = dxf_obj.entity
-        else:
-            entity = dxf_obj
+        entity = getattr(dxf_obj, 'entity', dxf_obj)
         
         # Получаем тип сущности
         entity_type = None
         if hasattr(entity, 'dxftype'):
-            entity_type = entity.dxftype()
+            try:
+                entity_type = entity.dxftype()
+            except:
+                pass
         
-        # Для POLYLINE - основной случай
-        if entity_type == 'POLYLINE' or hasattr(entity, 'vertices'):
-            # Обходим все вершины
-            for v in entity.vertices:
-                x = None
-                y = None
+        # ИСПРАВЛЕНО: Для POLYLINE - преобразуем генератор в список
+        if entity_type == 'POLYLINE' or (hasattr(entity, 'vertices') and entity_type != 'LWPOLYLINE'):
+            try:
+                vertices_iter = entity.vertices
+                # ИСПРАВЛЕНО: Безопасное преобразование в список
+                vertices_list = list(vertices_iter) if hasattr(vertices_iter, '__iter__') else []
                 
-                # Пробуем разные способы получения координат
-                if hasattr(v, 'dxf'):
-                    x = float(v.dxf.x)
-                    y = float(v.dxf.y)
-                elif hasattr(v, 'x') and hasattr(v, 'y'):
-                    x = float(v.x)
-                    y = float(v.y)
-                elif hasattr(v, 'location'):
-                    if hasattr(v.location, 'x'):
-                        x = float(v.location.x)
-                        y = float(v.location.y)
-                elif isinstance(v, (tuple, list)) and len(v) >= 2:
-                    x = float(v[0])
-                    y = float(v[1])
-                elif hasattr(v, 'X') and hasattr(v, 'Y'):
-                    x = float(v.X)
-                    y = float(v.Y)
-                
-                if x is not None and y is not None:
-                    vertices.append((x, y))
+                for v in vertices_list:
+                    x, y = None, None
+                    
+                    # Пробуем разные способы получения координат
+                    try:
+                        if hasattr(v, 'dxf') and hasattr(v.dxf, 'location'):
+                            x = float(v.dxf.location.x)
+                            y = float(v.dxf.location.y)
+                        elif hasattr(v, 'dxf'):
+                            x = float(getattr(v.dxf, 'x', 0))
+                            y = float(getattr(v.dxf, 'y', 0))
+                        elif hasattr(v, 'location'):
+                            if hasattr(v.location, 'x'):
+                                x = float(v.location.x)
+                                y = float(v.location.y)
+                            elif len(v.location) >= 2:
+                                x = float(v.location[0])
+                                y = float(v.location[1])
+                        elif hasattr(v, 'x') and hasattr(v, 'y'):
+                            x = float(v.x)
+                            y = float(v.y)
+                        elif isinstance(v, (tuple, list)) and len(v) >= 2:
+                            x = float(v[0])
+                            y = float(v[1])
+                    except (AttributeError, ValueError, TypeError, IndexError) as e:
+                        logger.debug(f"Failed to extract vertex coordinates: {e}")
+                        continue
+                    
+                    if x is not None and y is not None and not (math.isnan(x) or math.isnan(y)):
+                        vertices.append((x, y))
+            except Exception as e:
+                logger.warning(f"Error processing POLYLINE vertices: {e}")
         
         # Для LWPOLYLINE
-        elif entity_type == 'LWPOLYLINE':
-            if hasattr(entity, 'get_points'):
-                points = entity.get_points('xy')
+        elif entity_type == 'LWPOLYLINE' or hasattr(entity, 'get_points'):
+            try:
+                if hasattr(entity, 'get_points'):
+                    points = entity.get_points('xy')
+                elif hasattr(entity, 'points'):
+                    points = entity.points()
+                else:
+                    points = []
+                
                 for p in points:
                     if isinstance(p, (tuple, list)) and len(p) >= 2:
-                        vertices.append((float(p[0]), float(p[1])))
-            elif hasattr(entity, 'points'):
-                points = entity.points()
-                for p in points:
-                    if isinstance(p, (tuple, list)) and len(p) >= 2:
-                        vertices.append((float(p[0]), float(p[1])))
+                        try:
+                            x, y = float(p[0]), float(p[1])
+                            if not (math.isnan(x) or math.isnan(y)):
+                                vertices.append((x, y))
+                        except (ValueError, TypeError):
+                            continue
+            except Exception as e:
+                logger.warning(f"Error processing LWPOLYLINE points: {e}")
         
-        # Если не нашли вершины через vertices, пробуем points
+        # Fallback: пробуем points() если ничего не нашли
         if len(vertices) == 0 and hasattr(entity, 'points'):
-            points = entity.points()
-            for p in points:
-                if isinstance(p, (tuple, list)) and len(p) >= 2:
-                    vertices.append((float(p[0]), float(p[1])))
-                elif hasattr(p, 'x') and hasattr(p, 'y'):
-                    vertices.append((float(p.x), float(p.y)))
+            try:
+                points = entity.points() if callable(entity.points) else entity.points
+                for p in points:
+                    if isinstance(p, (tuple, list)) and len(p) >= 2:
+                        try:
+                            x, y = float(p[0]), float(p[1])
+                            if not (math.isnan(x) or math.isnan(y)):
+                                vertices.append((x, y))
+                        except (ValueError, TypeError):
+                            continue
+            except:
+                pass
         
-        # Если всё ещё нет вершин, пробуем get_coords
-        if len(vertices) == 0 and hasattr(entity, 'get_coords'):
-            coords = entity.get_coords()
-            for c in coords:
-                if isinstance(c, (tuple, list)) and len(c) >= 2:
-                    vertices.append((float(c[0]), float(c[1])))
-        
+        # ИСПРАВЛЕНО: Проверка минимума вершин
         if len(vertices) < 3:
+            logger.debug(f"Not enough vertices: {len(vertices)}")
             return None
         
-        # Замыкаем полигон если нужно
-        if vertices[0] != vertices[-1]:
-            vertices.append(vertices[0])
+        # ИСПРАВЛЕНО: Удаляем дубликаты и слишком близкие точки
+        unique_vertices = []
+        for v in vertices:
+            if not unique_vertices:
+                unique_vertices.append(v)
+            else:
+                last_v = unique_vertices[-1]
+                distance = math.hypot(v[0] - last_v[0], v[1] - last_v[1])
+                if distance > MIN_COORDINATE_DIFF:
+                    unique_vertices.append(v)
         
+        # Проверяем замкнутость и удаляем последнюю точку если она дублирует первую
+        if len(unique_vertices) >= 3:
+            first = unique_vertices[0]
+            last = unique_vertices[-1]
+            distance = math.hypot(last[0] - first[0], last[1] - first[1])
+            if distance < MIN_COORDINATE_DIFF:
+                unique_vertices = unique_vertices[:-1]
+        
+        if len(unique_vertices) < 3:
+            logger.debug(f"Not enough unique vertices: {len(unique_vertices)}")
+            return None
+        
+        # ИСПРАВЛЕНО: НЕ добавляем замыкающую точку - Shapely сделает это автоматически
         # Создаем полигон
-        poly = ShapelyPolygon(vertices)
+        poly = ShapelyPolygon(unique_vertices)
         
-        # Если полигон невалидный, пробуем исправить
+        # ИСПРАВЛЕНО: Используем make_valid для исправления невалидной геометрии
         if not poly.is_valid:
-            poly = poly.buffer(0)
+            try:
+                poly = make_valid(poly)
+                # Если получили мультиполигон, берем самый большой
+                if hasattr(poly, 'geoms'):
+                    poly = max(poly.geoms, key=lambda g: g.area)
+            except:
+                poly = poly.buffer(0)
         
-        # Если всё ещё невалидный, создаем convex hull
+        # Если всё ещё невалидный, пробуем convex hull
         if not poly.is_valid or poly.is_empty:
-            multi_point = MultiPoint(vertices)
-            poly = multi_point.convex_hull
+            try:
+                multi_point = MultiPoint(unique_vertices)
+                poly = multi_point.convex_hull
+            except:
+                return None
         
-        return poly if not poly.is_empty else None
+        # ИСПРАВЛЕНО: Проверка минимальной площади
+        if poly and not poly.is_empty and poly.area > MIN_POLYGON_AREA:
+            return poly
+        
+        return None
         
     except Exception as e:
-        print(f"Error converting to Shapely: {e}")
+        logger.error(f"Error converting DXF to Shapely: {e}")
         return None
 
 
 def extract_all_geometries(objects_data: List[Any]) -> List[Tuple[int, ShapelyPolygon, dict]]:
     """
-    Извлекает все геометрии из списка DXF объектов.
+    Извлекает все валидные геометрии из списка DXF объектов.
     """
     geometries = []
+    
+    if not objects_data:
+        return geometries
     
     for i, obj in enumerate(objects_data):
         if obj is None:
             continue
         
-        geom = dxf_object_to_shapely(obj)
-        
-        if geom is not None and not geom.is_empty:
-            bounds = geom.bounds
-            coords = list(geom.exterior.coords)
-            info = {
-                'index': i,
-                'type': get_polygon_type(geom),
-                'width': bounds[2] - bounds[0],
-                'height': bounds[3] - bounds[1],
-                'area': geom.area,
-                'vertices': len(coords) - 1
-            }
-            geometries.append((i, geom, info))
+        try:
+            geom = dxf_object_to_shapely(obj)
+            
+            if geom is not None and not geom.is_empty:
+                bounds = geom.bounds
+                coords = list(geom.exterior.coords)
+                info = {
+                    'index': i,
+                    'type': get_polygon_type(geom),
+                    'width': bounds[2] - bounds[0],
+                    'height': bounds[3] - bounds[1],
+                    'area': geom.area,
+                    'vertices': len(coords) - 1
+                }
+                geometries.append((i, geom, info))
+        except Exception as e:
+            logger.warning(f"Failed to extract geometry from object {i}: {e}")
+            continue
     
     return geometries
 
@@ -243,7 +319,7 @@ def get_polygon_type(geom: ShapelyPolygon) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Геометрия тесселяции треугольников
+# Геометрия тесселяции треугольников (ИСПРАВЛЕННАЯ)
 # ---------------------------------------------------------------------------
 
 Vec2 = Tuple[float, float]
@@ -251,6 +327,9 @@ Vec2 = Tuple[float, float]
 
 def get_triangle_vertices(geom: ShapelyPolygon) -> List[Vec2]:
     """Извлекает вершины треугольника."""
+    if geom is None or geom.is_empty:
+        raise ValueError("Invalid geometry")
+    
     coords = list(geom.exterior.coords)[:-1]
     if len(coords) != 3:
         raise ValueError(f"Not a triangle, has {len(coords)} vertices")
@@ -272,7 +351,7 @@ def reflect_point_over_line(p: Vec2, a: Vec2, b: Vec2) -> Vec2:
     dx, dy = b[0] - a[0], b[1] - a[1]
     length_sq = dx * dx + dy * dy
     
-    if length_sq < 1e-12:
+    if length_sq < MIN_COORDINATE_DIFF:
         return p
     
     t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length_sq
@@ -282,54 +361,82 @@ def reflect_point_over_line(p: Vec2, a: Vec2, b: Vec2) -> Vec2:
     return (2 * proj_x - p[0], 2 * proj_y - p[1])
 
 
-def get_tessellation_params(geom: ShapelyPolygon) -> Optional[dict]:
-    """Создает параметры для тесселяции треугольника."""
+def get_tessellation_params(geom: ShapelyPolygon) -> Optional[Dict]:
+    """
+    Создает параметры для тесселяции треугольника.
+    ИСПРАВЛЕНО: корректная нормализация и отражение.
+    """
     try:
         verts = get_triangle_vertices(geom)
         edge1, edge2, base_length = get_longest_edge(verts)
         
-        base_verts = (verts[edge1], verts[edge2])
+        # ИСПРАВЛЕНО: Защита от нулевой длины
+        if base_length < MIN_COORDINATE_DIFF:
+            return None
+        
+        # Определяем базовые вершины и вершину-апекс
+        base_verts = [verts[edge1], verts[edge2]]
         apex_idx = 3 - edge1 - edge2
         apex = verts[apex_idx]
         
-        # Вычисляем высоту
+        # Вычисляем высоту треугольника
         x1, y1 = base_verts[0]
         x2, y2 = base_verts[1]
         x3, y3 = apex
         area = abs((x2 - x1) * (y3 - y1) - (x3 - x1) * (y2 - y1)) / 2
-        height = 2 * area / base_length if base_length > 0 else 0
+        height = 2 * area / base_length if base_length > MIN_COORDINATE_DIFF else 0
         
-        # Отражаем вершину
+        # ИСПРАВЛЕНО: Защита от нулевой высоты
+        if height < MIN_COORDINATE_DIFF:
+            return None
+        
+        # Отражаем апекс относительно базы
         reflected_apex = reflect_point_over_line(apex, base_verts[0], base_verts[1])
         
-        # Нормализуем координаты
+        # ИСПРАВЛЕНО: Правильная нормализация координат
+        # Находим минимальные координаты для нормализации
+        min_x = min(base_verts[0][0], base_verts[1][0])
         min_y = min(base_verts[0][1], base_verts[1][1])
         
-        original_verts = [(v[0] - base_verts[0][0], v[1] - min_y) for v in verts]
-        reflected_verts = [
-            (0, 0),
-            (base_length, 0),
-            (reflected_apex[0] - base_verts[0][0], reflected_apex[1] - min_y)
+        # Нормализуем оригинальные вершины
+        original_normalized = [
+            (v[0] - min_x, v[1] - min_y) for v in verts
+        ]
+        
+        # ИСПРАВЛЕНО: Правильная нормализация отраженного треугольника
+        # Сначала нормализуем базу к (0, 0) и (base_length, 0)
+        base_v1_norm = (base_verts[0][0] - min_x, base_verts[0][1] - min_y)
+        base_v2_norm = (base_verts[1][0] - min_x, base_verts[1][1] - min_y)
+        apex_norm = (apex[0] - min_x, apex[1] - min_y)
+        reflected_apex_norm = (reflected_apex[0] - min_x, reflected_apex[1] - min_y)
+        
+        # Создаем отраженный треугольник с теми же базовыми вершинами
+        reflected_normalized = [
+            base_v1_norm,
+            base_v2_norm,
+            reflected_apex_norm
         ]
         
         return {
-            'original': original_verts,
-            'reflected': reflected_verts,
+            'original': original_normalized,
+            'reflected': reflected_normalized,
             'base_length': base_length,
             'height': height,
+            'offset_x': min_x,
+            'offset_y': min_y
         }
         
     except Exception as e:
-        logger.error(f"Tessellation error: {e}")
+        logger.error(f"Tessellation params error: {e}")
         return None
 
 
 # ---------------------------------------------------------------------------
-# Основной класс оптимизатора
+# Основной класс оптимизатора (ИСПРАВЛЕННАЯ ВЕРСИЯ)
 # ---------------------------------------------------------------------------
 
 class AdvancedNestingOptimizer:
-    """Продвинутый алгоритм раскроя."""
+    """Продвинутый алгоритм раскроя с исправленными ошибками."""
     
     def __init__(
         self,
@@ -338,19 +445,45 @@ class AdvancedNestingOptimizer:
         spacing: float = 5.0,
         rotation_step: float = 15.0,
     ):
-        self.sheet_width = sheet_width
-        self.sheet_height = sheet_height
-        self.spacing = spacing
-        self.rotation_step = rotation_step
+        # Валидация входных параметров
+        if sheet_width <= 0 or sheet_height <= 0:
+            raise ValueError("Sheet dimensions must be positive")
+        if spacing < 0:
+            raise ValueError("Spacing cannot be negative")
+        
+        self.sheet_width = float(sheet_width)
+        self.sheet_height = float(sheet_height)
+        self.spacing = float(spacing)
+        self.rotation_step = float(rotation_step)
     
     def optimize(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
         """Выполняет оптимизацию раскроя."""
         if not SHAPELY_AVAILABLE:
             return self._create_empty_result(quantity, "Shapely not available")
         
+        # ИСПРАВЛЕНО: Валидация входных данных
+        if part_geometry is None or part_geometry.is_empty:
+            return self._create_empty_result(quantity, "Invalid geometry")
+        
+        if quantity <= 0:
+            return self._create_empty_result(0, "Invalid quantity")
+        
         try:
             # Нормализуем геометрию
             bounds = part_geometry.bounds
+            
+            # ИСПРАВЛЕНО: Проверка что деталь помещается на лист
+            part_width = bounds[2] - bounds[0]
+            part_height = bounds[3] - bounds[1]
+            
+            if (part_width > self.sheet_width - 2 * self.spacing or 
+                part_height > self.sheet_height - 2 * self.spacing):
+                # Пробуем повернуть
+                if (part_height > self.sheet_width - 2 * self.spacing or 
+                    part_width > self.sheet_height - 2 * self.spacing):
+                    return self._create_empty_result(quantity, 
+                        f"Part too large for sheet ({part_width:.1f}×{part_height:.1f} mm)")
+            
             cx = (bounds[0] + bounds[2]) / 2
             cy = (bounds[1] + bounds[3]) / 2
             normalized = translate(part_geometry, xoff=-cx, yoff=-cy)
@@ -365,13 +498,44 @@ class AdvancedNestingOptimizer:
                 
         except Exception as e:
             logger.error(f"Optimization error: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return self._create_empty_result(quantity, str(e))
     
     def _create_empty_result(self, quantity: int, error_msg: str) -> NestingResult:
+        """Создает пустой результат с сообщением об ошибке."""
         return NestingResult(
-            sheets=[], total_parts=quantity, parts_placed=0, parts_not_placed=quantity,
-            total_material_used=0.0, total_waste=0.0, average_efficiency=0.0,
+            sheets=[], 
+            total_parts=quantity, 
+            parts_placed=0, 
+            parts_not_placed=quantity,
+            total_material_used=0.0, 
+            total_waste=0.0, 
+            average_efficiency=0.0,
             algorithm_used=f"Failed: {error_msg}"
+        )
+    
+    def _calculate_result_statistics(self, sheets: List[Sheet], quantity: int, 
+                                    parts_placed: int, algorithm: str) -> NestingResult:
+        """Вычисляет статистику результатов."""
+        # Обновляем эффективность для каждого листа
+        for sheet in sheets:
+            if sheet.total_area > 0:
+                sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
+        
+        total_material = sum(s.total_area for s in sheets)
+        total_waste = sum(s.waste_area for s in sheets)
+        avg_eff = sum(s.efficiency for s in sheets) / len(sheets) if sheets else 0.0
+        
+        return NestingResult(
+            sheets=sheets,
+            total_parts=quantity,
+            parts_placed=parts_placed,
+            parts_not_placed=quantity - parts_placed,
+            total_material_used=total_material,
+            total_waste=total_waste,
+            average_efficiency=avg_eff,
+            algorithm_used=algorithm
         )
     
     def _optimize_triangle(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
@@ -379,12 +543,16 @@ class AdvancedNestingOptimizer:
         best_result = None
         best_count = 0
         
-        for base_angle in [0, 90, 180, 270]:
+        for base_angle in TRIANGLE_BASE_ANGLES:
             try:
                 rotated = rotate(part_geometry, base_angle, origin="centroid")
                 
                 params = get_tessellation_params(rotated)
                 if not params:
+                    continue
+                
+                # ИСПРАВЛЕНО: Проверка валидности параметров
+                if params['base_length'] < MIN_COORDINATE_DIFF or params['height'] < MIN_COORDINATE_DIFF:
                     continue
                 
                 result = self._place_triangles_by_tessellation(
@@ -402,16 +570,21 @@ class AdvancedNestingOptimizer:
                 logger.warning(f"Tessellation at {base_angle}° failed: {exc}")
                 continue
         
+        # Если тесселяция не дала результатов, используем общий алгоритм
         if best_result is None or best_result.parts_placed == 0:
+            logger.info("Tessellation failed, falling back to general algorithm")
             return self._optimize_general(part_geometry, quantity)
         
         return best_result
     
     def _place_triangles_by_tessellation(
-        self, part_geometry: ShapelyPolygon, params: dict,
+        self, part_geometry: ShapelyPolygon, params: Dict,
         quantity: int, base_angle: float
     ) -> NestingResult:
-        """Размещает треугольники с использованием тесселяции."""
+        """
+        Размещает треугольники с использованием тесселяции.
+        ИСПРАВЛЕНО: защита от деления на ноль, корректное размещение.
+        """
         sheets: List[Sheet] = []
         parts_placed = 0
         part_area = part_geometry.area
@@ -419,16 +592,28 @@ class AdvancedNestingOptimizer:
         base_length = params['base_length']
         height = params['height']
         
-        if base_length <= 0 or height <= 0:
-            return self._create_empty_result(quantity, "Invalid triangle dimensions")
+        # ИСПРАВЛЕНО: Защита от деления на ноль
+        if base_length <= MIN_COORDINATE_DIFF or height <= MIN_COORDINATE_DIFF:
+            return self._create_empty_result(quantity, "Invalid triangle dimensions for tessellation")
         
         col_step = base_length + self.spacing
         row_step = height + self.spacing
         
-        cols_per_row = max(1, int((self.sheet_width - self.spacing * 2) / col_step))
-        rows = max(1, int((self.sheet_height - self.spacing * 2) / row_step))
+        # ИСПРАВЛЕНО: Защита от деления на ноль при вычислении количества колонок/рядов
+        if col_step <= 0 or row_step <= 0:
+            return self._create_empty_result(quantity, "Invalid step size")
+        
+        usable_width = self.sheet_width - 2 * self.spacing
+        usable_height = self.sheet_height - 2 * self.spacing
+        
+        if usable_width <= 0 or usable_height <= 0:
+            return self._create_empty_result(quantity, "Sheet too small for spacing")
+        
+        cols_per_row = max(1, int(usable_width / col_step))
+        rows = max(1, int(usable_height / row_step))
         
         part_id = 1
+        current_sheet = None
         
         for row in range(rows):
             if part_id > quantity:
@@ -438,72 +623,63 @@ class AdvancedNestingOptimizer:
                 if part_id > quantity:
                     break
                 
-                if not sheets or len(sheets[-1].parts) >= 100:
-                    sheets.append(Sheet(
+                # Создаем новый лист если нужно
+                if current_sheet is None or len(current_sheet.parts) >= 100:
+                    current_sheet = Sheet(
                         sheet_number=len(sheets) + 1,
                         width=self.sheet_width,
                         height=self.sheet_height
-                    ))
+                    )
+                    sheets.append(current_sheet)
                 
-                current_sheet = sheets[-1]
-                
+                # Вычисляем позицию
                 x = self.spacing + col * col_step
                 y = self.spacing + row * row_step
                 
-                if x + base_length <= self.sheet_width - self.spacing and y + height <= self.sheet_height - self.spacing:
+                # Проверяем что деталь помещается
+                if x + base_length > self.sheet_width - self.spacing or y + height > self.sheet_height - self.spacing:
+                    continue
+                
+                # Размещаем оригинальный треугольник
+                verts = params['original']
+                geom1 = ShapelyPolygon([(x + v[0], y + v[1]) for v in verts])
+                
+                if self._can_place_on_sheet(current_sheet, geom1):
+                    current_sheet.parts.append(PlacedPart(
+                        part_id=part_id,
+                        part_name=f"Деталь #{part_id}",
+                        x=x, y=y,
+                        rotation=base_angle,
+                        geometry=geom1,
+                        bounding_box=geom1.bounds
+                    ))
+                    current_sheet.used_area += part_area
+                    current_sheet.rebuild_spatial_index()  # ИСПРАВЛЕНО: обновляем индекс
+                    parts_placed += 1
+                    part_id += 1
+                
+                # Размещаем отраженный треугольник
+                if part_id <= quantity:
+                    verts_r = params['reflected']
+                    geom2 = ShapelyPolygon([(x + v[0], y + v[1]) for v in verts_r])
                     
-                    # Оригинальный треугольник
-                    verts = params['original']
-                    geom1 = ShapelyPolygon([(x + v[0], y + v[1]) for v in verts])
-                    
-                    if self._can_place_on_sheet(current_sheet, geom1):
+                    if self._can_place_on_sheet(current_sheet, geom2):
                         current_sheet.parts.append(PlacedPart(
                             part_id=part_id,
                             part_name=f"Деталь #{part_id}",
                             x=x, y=y,
-                            rotation=base_angle,
-                            geometry=geom1,
-                            bounding_box=geom1.bounds
+                            rotation=base_angle + 180,
+                            geometry=geom2,
+                            bounding_box=geom2.bounds
                         ))
                         current_sheet.used_area += part_area
+                        current_sheet.rebuild_spatial_index()  # ИСПРАВЛЕНО: обновляем индекс
                         parts_placed += 1
                         part_id += 1
-                    
-                    # Отраженный треугольник
-                    if part_id <= quantity:
-                        verts_r = params['reflected']
-                        geom2 = ShapelyPolygon([(x + v[0], y + v[1]) for v in verts_r])
-                        
-                        if self._can_place_on_sheet(current_sheet, geom2):
-                            current_sheet.parts.append(PlacedPart(
-                                part_id=part_id,
-                                part_name=f"Деталь #{part_id}",
-                                x=x, y=y,
-                                rotation=base_angle + 180,
-                                geometry=geom2,
-                                bounding_box=geom2.bounds
-                            ))
-                            current_sheet.used_area += part_area
-                            parts_placed += 1
-                            part_id += 1
         
-        for sheet in sheets:
-            if sheet.total_area > 0:
-                sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
-        
-        total_material = sum(s.total_area for s in sheets)
-        total_waste = sum(s.waste_area for s in sheets)
-        avg_eff = sum(s.efficiency for s in sheets) / len(sheets) if sheets else 0.0
-        
-        return NestingResult(
-            sheets=sheets,
-            total_parts=quantity,
-            parts_placed=parts_placed,
-            parts_not_placed=quantity - parts_placed,
-            total_material_used=total_material,
-            total_waste=total_waste,
-            average_efficiency=avg_eff,
-            algorithm_used=f"Triangle Tessellation"
+        return self._calculate_result_statistics(
+            sheets, quantity, parts_placed, 
+            f"Triangle Tessellation (angle={base_angle}°)"
         )
     
     def _optimize_general(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
@@ -514,12 +690,14 @@ class AdvancedNestingOptimizer:
         for part_num in range(1, quantity + 1):
             placed = False
             
+            # Пробуем разместить на существующих листах
             for sheet in sheets:
                 if self._try_place_general(sheet, part_num, part_geometry):
                     placed = True
                     parts_placed += 1
                     break
             
+            # Создаем новый лист если не поместилось
             if not placed:
                 new_sheet = Sheet(
                     sheet_number=len(sheets) + 1,
@@ -530,25 +708,12 @@ class AdvancedNestingOptimizer:
                     sheets.append(new_sheet)
                     parts_placed += 1
                 else:
+                    # Деталь не помещается даже на новый лист
+                    logger.warning(f"Part {part_num} cannot fit on sheet")
                     break
         
-        for sheet in sheets:
-            if sheet.total_area > 0:
-                sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
-        
-        total_material = sum(s.total_area for s in sheets)
-        total_waste = sum(s.waste_area for s in sheets)
-        avg_eff = sum(s.efficiency for s in sheets) / len(sheets) if sheets else 0.0
-        
-        return NestingResult(
-            sheets=sheets,
-            total_parts=quantity,
-            parts_placed=parts_placed,
-            parts_not_placed=quantity - parts_placed,
-            total_material_used=total_material,
-            total_waste=total_waste,
-            average_efficiency=avg_eff,
-            algorithm_used="Bottom-Left Packing"
+        return self._calculate_result_statistics(
+            sheets, quantity, parts_placed, "Bottom-Left Packing"
         )
     
     def _try_place_general(self, sheet: Sheet, part_id: int, geometry: ShapelyPolygon) -> bool:
@@ -556,23 +721,28 @@ class AdvancedNestingOptimizer:
         best = None
         best_score = float("inf")
         
-        angles = [0, 45, 90, 135, 180, 225, 270, 315]
-        
-        for angle in angles:
-            rotated = rotate(geometry, angle, origin="centroid")
-            
-            for x, y in self._get_bottom_left_positions(sheet, rotated):
-                test_geom = translate(rotated, xoff=x, yoff=y)
+        for angle in DEFAULT_ROTATION_ANGLES:
+            try:
+                rotated = rotate(geometry, angle, origin="centroid")
                 
-                if self._can_place_on_sheet(sheet, test_geom):
-                    score = self._evaluate_placement(sheet, test_geom)
+                positions = self._get_bottom_left_positions(sheet, rotated)
+                
+                for x, y in positions:
+                    test_geom = translate(rotated, xoff=x, yoff=y)
                     
-                    if score < best_score:
-                        best_score = score
-                        best = (x, y, angle, rotated)
-                    
-                    if not sheet.parts:
-                        break
+                    if self._can_place_on_sheet(sheet, test_geom):
+                        score = self._evaluate_placement(sheet, test_geom)
+                        
+                        if score < best_score:
+                            best_score = score
+                            best = (x, y, angle, rotated)
+                        
+                        # Для первой детали берем первую подходящую позицию
+                        if not sheet.parts:
+                            break
+            except Exception as e:
+                logger.warning(f"Error trying angle {angle}: {e}")
+                continue
         
         if best is None:
             return False
@@ -589,78 +759,138 @@ class AdvancedNestingOptimizer:
             bounding_box=placed_geom.bounds
         ))
         sheet.used_area += geometry.area
+        sheet.rebuild_spatial_index()  # ИСПРАВЛЕНО: обновляем индекс после добавления
         
         return True
     
     def _get_bottom_left_positions(self, sheet: Sheet, geometry: ShapelyPolygon) -> List[Tuple[float, float]]:
-        """Генерирует позиции для Bottom-Left алгоритма."""
+        """
+        Генерирует позиции для Bottom-Left алгоритма.
+        ИСПРАВЛЕНО: ограничение количества позиций, оптимизация шага.
+        """
         bounds = geometry.bounds
         part_width = bounds[2] - bounds[0]
         part_height = bounds[3] - bounds[1]
         
         positions = []
         
+        # Для пустого листа - только левый нижний угол
         if not sheet.parts:
             positions.append((self.spacing - bounds[0], self.spacing - bounds[1]))
             return positions
         
-        step = max(5, int(min(part_width, part_height) / 10))
+        # ИСПРАВЛЕНО: Адаптивный шаг поиска
+        step = max(5, min(part_width, part_height) / POSITION_STEP_DIVISOR)
+        step = int(step)
         
         # Вдоль нижней границы
-        for x in range(int(self.spacing), int(self.sheet_width - part_width - self.spacing + 1), step):
+        x = int(self.spacing)
+        max_x = int(self.sheet_width - part_width - self.spacing)
+        while x <= max_x:
             positions.append((x - bounds[0], self.spacing - bounds[1]))
+            x += step
         
         # Вдоль левой границы
-        for y in range(int(self.spacing), int(self.sheet_height - part_height - self.spacing + 1), step):
+        y = int(self.spacing)
+        max_y = int(self.sheet_height - part_height - self.spacing)
+        while y <= max_y:
             positions.append((self.spacing - bounds[0], y - bounds[1]))
+            y += step
         
         # Около существующих деталей
         for part in sheet.parts:
             pb = part.bounding_box
             
-            # Справа
+            # Справа от детали
             x_right = pb[2] + self.spacing
             if x_right + part_width <= self.sheet_width - self.spacing:
                 positions.append((x_right - bounds[0], pb[1] - bounds[1]))
-                positions.append((x_right - bounds[0], pb[3] - part_height - bounds[1]))
+                if pb[3] - part_height >= self.spacing:
+                    positions.append((x_right - bounds[0], pb[3] - part_height - bounds[1]))
             
-            # Сверху
+            # Сверху от детали
             y_top = pb[3] + self.spacing
             if y_top + part_height <= self.sheet_height - self.spacing:
                 positions.append((pb[0] - bounds[0], y_top - bounds[1]))
-                positions.append((pb[2] - part_width - bounds[0], y_top - bounds[1]))
+                if pb[2] - part_width >= self.spacing:
+                    positions.append((pb[2] - part_width - bounds[0], y_top - bounds[1]))
         
-        # Удаляем дубликаты
-        positions = list(dict.fromkeys(positions))
-        positions.sort(key=lambda p: (p[1], p[0]))
+        # ИСПРАВЛЕНО: Удаляем дубликаты с учетом погрешности
+        unique_positions = []
+        for pos in positions:
+            is_duplicate = False
+            for existing_pos in unique_positions:
+                if (abs(pos[0] - existing_pos[0]) < MIN_COORDINATE_DIFF and 
+                    abs(pos[1] - existing_pos[1]) < MIN_COORDINATE_DIFF):
+                    is_duplicate = True
+                    break
+            if not is_duplicate:
+                unique_positions.append(pos)
         
-        return positions[:200]
+        # Сортируем: сначала по Y (снизу вверх), потом по X (слева направо)
+        unique_positions.sort(key=lambda p: (p[1], p[0]))
+        
+        # ИСПРАВЛЕНО: Ограничиваем количество кандидатов
+        return unique_positions[:MAX_POSITION_CANDIDATES]
     
     def _evaluate_placement(self, sheet: Sheet, geometry: ShapelyPolygon) -> float:
-        """Оценивает качество размещения."""
+        """Оценивает качество размещения (меньше = лучше)."""
         bounds = geometry.bounds
-        return bounds[1] * 1000 + bounds[0]
+        # Приоритет: ниже и левее
+        score = bounds[1] * 1000 + bounds[0]
+        return score
     
     def _can_place_on_sheet(self, sheet: Sheet, geometry: ShapelyPolygon) -> bool:
-        """Проверяет возможность размещения."""
+        """
+        Проверяет возможность размещения.
+        ИСПРАВЛЕНО: использует пространственный индекс для O(log n) вместо O(n).
+        """
         bounds = geometry.bounds
         
-        # Проверка границ
-        if (bounds[0] < self.spacing or bounds[1] < self.spacing or 
+        # Проверка границ листа
+        if (bounds[0] < self.spacing or 
+            bounds[1] < self.spacing or 
             bounds[2] > self.sheet_width - self.spacing or 
             bounds[3] > self.sheet_height - self.spacing):
             return False
         
-        # Проверка пересечений
+        # Для пустого листа - всегда можно разместить
+        if not sheet.parts:
+            return True
+        
+        # ИСПРАВЛЕНО: Используем пространственный индекс если доступен
+        if sheet.spatial_index is not None:
+            try:
+                # Быстрый поиск через R-tree
+                nearby_geoms = sheet.spatial_index.query(geometry)
+                
+                for nearby_geom in nearby_geoms:
+                    # Проверяем дистанцию
+                    distance = geometry.distance(nearby_geom)
+                    if distance < self.spacing - MIN_COORDINATE_DIFF:
+                        return False
+                
+                return True
+            except Exception as e:
+                logger.warning(f"Spatial index query failed: {e}, falling back to linear search")
+                # Fallback на линейный поиск
+        
+        # Линейный поиск (fallback или если индекса нет)
         for part in sheet.parts:
-            if geometry.distance(part.geometry) < self.spacing:
+            try:
+                distance = geometry.distance(part.geometry)
+                if distance < self.spacing - MIN_COORDINATE_DIFF:
+                    return False
+            except Exception as e:
+                logger.warning(f"Distance check failed: {e}")
+                # В случае ошибки считаем что пересекается
                 return False
         
         return True
 
 
 # ---------------------------------------------------------------------------
-# Streamlit интерфейс
+# Streamlit интерфейс (УЛУЧШЕННАЯ ВЕРСИЯ)
 # ---------------------------------------------------------------------------
 
 def render_nesting_optimizer_tab(objects_data: List[Any] = None):
@@ -677,6 +907,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
     
     st.markdown("## 🔲 Продвинутая оптимизация раскроя")
     st.markdown("**Плотная упаковка деталей с учетом реальной формы и поворотов.**")
+    st.markdown("---")
     
     if not SHAPELY_AVAILABLE:
         st.error("❌ Библиотека **shapely** не установлена.\n\nВыполните: `pip install shapely`")
@@ -686,7 +917,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         st.warning("⚠️ Нет данных для оптимизации. Загрузите и обработайте DXF файл.")
         return
     
-    st.success(f"✅ Загружено объектов: {len(objects_data)}")
+    st.success(f"✅ Загружено объектов: **{len(objects_data)}**")
     
     # Извлекаем все геометрии
     with st.spinner('🔍 Анализ геометрии чертежа...'):
@@ -697,15 +928,22 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         
         # Показываем отладочную информацию
         with st.expander("🔧 Отладочная информация"):
-            st.write("Типы объектов в данных:")
-            for i, obj in enumerate(objects_data[:5]):
+            st.write("**Типы объектов в данных:**")
+            for i, obj in enumerate(objects_data[:10]):
                 obj_type = type(obj).__name__
-                st.write(f"  Объект {i}: {obj_type}")
+                st.write(f"  • Объект {i}: `{obj_type}`")
                 if hasattr(obj, 'entity'):
                     if hasattr(obj.entity, 'dxftype'):
-                        st.write(f"    Тип DXF: {obj.entity.dxftype()}")
+                        try:
+                            st.write(f"    └─ Тип DXF: `{obj.entity.dxftype()}`")
+                        except:
+                            pass
                     if hasattr(obj.entity, 'vertices'):
-                        st.write(f"    Количество вершин: {len(list(obj.entity.vertices))}")
+                        try:
+                            v_list = list(obj.entity.vertices)
+                            st.write(f"    └─ Вершин: {len(v_list)}")
+                        except:
+                            pass
         return
     
     # Создаем DataFrame с информацией
@@ -723,22 +961,37 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
     st.markdown("### 📐 Доступные объекты")
     st.dataframe(pd.DataFrame(info_data), use_container_width=True, hide_index=True)
     
-    # Выбор детали
-    st.markdown("### 🎯 Выбор детали")
+    st.markdown("---")
     
-    selected_idx = st.selectbox(
-        "Выберите объект для раскроя:",
-        options=range(len(geometries)),
-        format_func=lambda i: f"Объект #{geometries[i][0] + 1} — {geometries[i][2]['type']} ({geometries[i][2]['width']:.1f}×{geometries[i][2]['height']:.1f} мм)"
-    )
+    # Выбор детали
+    st.markdown("### 🎯 Параметры раскроя")
+    
+    col_select, col_qty = st.columns([2, 1])
+    
+    with col_select:
+        selected_idx = st.selectbox(
+            "Выберите объект для раскроя:",
+            options=range(len(geometries)),
+            format_func=lambda i: f"Объект #{geometries[i][0] + 1} — {geometries[i][2]['type']} ({geometries[i][2]['width']:.1f}×{geometries[i][2]['height']:.1f} мм)"
+        )
+    
+    with col_qty:
+        quantity = st.number_input(
+            "Количество деталей", 
+            value=20, 
+            min_value=1, 
+            max_value=1000, 
+            step=1
+        )
     
     selected_geom = geometries[selected_idx][1]
     selected_info = geometries[selected_idx][2]
     
     # Информация о выбранной детали
+    st.markdown("#### 📏 Параметры детали")
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Тип", selected_info['type'])
+        st.metric("Тип", selected_info['type'].title())
     with col2:
         st.metric("Ширина", f"{selected_info['width']:.2f} мм")
     with col3:
@@ -746,7 +999,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
     with col4:
         st.metric("Площадь", f"{selected_info['area']/1e6:.4f} м²")
     
-    # Предпросмотр
+    # Предпросмотр геометрии
     with st.expander("🔍 Предпросмотр геометрии", expanded=False):
         fig, ax = plt.subplots(figsize=(10, 8))
         fig.patch.set_facecolor('#FFFFFF')
@@ -758,17 +1011,26 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         if len(coords) > 2:
             polygon = MplPolygon(
                 coords,
-                linewidth=2, edgecolor='#0000FF', facecolor='#ADD8E6', alpha=0.7
+                linewidth=2.5, 
+                edgecolor='#0066CC', 
+                facecolor='#ADD8E6', 
+                alpha=0.6
             )
             ax.add_patch(polygon)
+            
+            # Отмечаем вершины
+            xs, ys = zip(*coords[:-1])
+            ax.scatter(xs, ys, c='red', s=50, zorder=5, label='Вершины')
         
         ax.set_aspect('equal')
-        ax.grid(True, alpha=0.3)
-        ax.set_title("Геометрия детали", fontsize=14, fontweight='bold')
-        ax.set_xlabel('X (мм)')
-        ax.set_ylabel('Y (мм)')
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.set_title(f"Геометрия детали: {selected_info['type']}", 
+                    fontsize=14, fontweight='bold', pad=15)
+        ax.set_xlabel('X (мм)', fontsize=11)
+        ax.set_ylabel('Y (мм)', fontsize=11)
+        ax.legend()
         
-        margin = max(selected_info['width'], selected_info['height']) * 0.1
+        margin = max(selected_info['width'], selected_info['height']) * 0.15
         ax.set_xlim(bounds[0] - margin, bounds[2] + margin)
         ax.set_ylim(bounds[1] - margin, bounds[3] + margin)
         
@@ -777,41 +1039,85 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
     
     st.markdown("---")
     
-    # Параметры раскроя
-    st.markdown("### ⚙️ Параметры раскроя")
+    # Параметры листа
+    st.markdown("#### 📄 Параметры листа")
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     
     with col1:
-        sheet_width = st.number_input("Ширина листа (мм)", value=3000.0, step=100.0, min_value=100.0)
-        sheet_height = st.number_input("Высота листа (мм)", value=1500.0, step=100.0, min_value=100.0)
+        sheet_width = st.number_input(
+            "Ширина листа (мм)", 
+            value=3000.0, 
+            step=100.0, 
+            min_value=100.0,
+            help="Ширина материала листа"
+        )
     
     with col2:
-        quantity = st.number_input("Количество деталей", value=20, min_value=1, max_value=500, step=1)
-        spacing = st.number_input("Отступ между деталями (мм)", value=5.0, min_value=0.0, max_value=50.0, step=1.0)
+        sheet_height = st.number_input(
+            "Высота листа (мм)", 
+            value=1500.0, 
+            step=100.0, 
+            min_value=100.0,
+            help="Высота материала листа"
+        )
+    
+    with col3:
+        spacing = st.number_input(
+            "Отступ между деталями (мм)", 
+            value=5.0, 
+            min_value=0.0, 
+            max_value=50.0, 
+            step=1.0,
+            help="Минимальное расстояние между деталями"
+        )
+    
+    # Проверка возможности размещения
+    min_required_width = selected_info['width'] + 2 * spacing
+    min_required_height = selected_info['height'] + 2 * spacing
+    
+    if sheet_width < min_required_width or sheet_height < min_required_height:
+        st.warning(f"⚠️ Деталь может не поместиться на лист. "
+                  f"Минимальные размеры листа: {min_required_width:.0f}×{min_required_height:.0f} мм")
     
     st.markdown("---")
     
     # Запуск оптимизации
     if st.button("🚀 Запустить оптимизацию", type="primary", use_container_width=True):
-        with st.spinner(f'⏳ Оптимизация размещения {quantity} деталей...'):
-            try:
-                optimizer = AdvancedNestingOptimizer(
-                    sheet_width, sheet_height, spacing
-                )
-                
-                result = optimizer.optimize(selected_geom, quantity)
-                
-                st.session_state['nesting_result'] = result
-                
-                st.success("✅ Оптимизация завершена!")
-                st.balloons()
-                
-            except Exception as e:
-                st.error(f"❌ Ошибка при оптимизации: {e}")
-                import traceback
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            status_text.text(f'⏳ Инициализация оптимизатора...')
+            progress_bar.progress(10)
+            
+            optimizer = AdvancedNestingOptimizer(
+                sheet_width, sheet_height, spacing
+            )
+            
+            status_text.text(f'⏳ Оптимизация размещения {quantity} деталей...')
+            progress_bar.progress(30)
+            
+            result = optimizer.optimize(selected_geom, quantity)
+            
+            progress_bar.progress(100)
+            status_text.text("✅ Оптимизация завершена!")
+            
+            # Сохраняем в session state
+            st.session_state['nesting_result'] = result
+            st.session_state['nesting_geometry'] = selected_geom
+            st.session_state['nesting_info'] = selected_info
+            
+            st.success("✅ Оптимизация завершена успешно!")
+            st.balloons()
+            
+        except Exception as e:
+            st.error(f"❌ Ошибка при оптимизации: {e}")
+            import traceback
+            with st.expander("🐛 Детали ошибки"):
                 st.code(traceback.format_exc())
-                return
+            return
     
     # Отображение результатов
     if 'nesting_result' in st.session_state:
@@ -820,13 +1126,19 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         st.markdown("---")
         st.markdown("### 📊 Результаты оптимизации")
         
+        # Основные метрики
         col1, col2, col3, col4, col5 = st.columns(5)
+        
         with col1:
             st.metric("📄 Листов", len(result.sheets))
         with col2:
-            st.metric("✅ Размещено", f"{result.parts_placed}/{result.total_parts}")
+            placement_rate = (result.parts_placed / result.total_parts * 100) if result.total_parts > 0 else 0
+            st.metric("✅ Размещено", f"{result.parts_placed}/{result.total_parts}", 
+                     delta=f"{placement_rate:.0f}%")
         with col3:
-            st.metric("❌ Не поместилось", result.parts_not_placed)
+            st.metric("❌ Не поместилось", result.parts_not_placed, 
+                     delta="Проблема!" if result.parts_not_placed > 0 else None,
+                     delta_color="inverse")
         with col4:
             st.metric("📈 Эффективность", f"{result.average_efficiency:.1f}%")
         with col5:
@@ -834,52 +1146,119 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         
         st.info(f"**Алгоритм:** {result.algorithm_used}")
         
+        # Предупреждения
         if result.parts_not_placed > 0:
-            st.warning(f"⚠️ **{result.parts_not_placed}** деталей не поместились!")
+            st.warning(f"⚠️ **{result.parts_not_placed}** деталей не поместились! "
+                      f"Попробуйте увеличить размер листа или уменьшить отступы.")
+        
+        if result.parts_placed == 0:
+            st.error("❌ Ни одна деталь не размещена!")
         
         # Визуализация листов
-        if result.sheets:
+        if result.sheets and result.parts_placed > 0:
+            st.markdown("---")
             st.markdown("### 🎨 Визуализация раскроя")
             
-            for sheet in result.sheets[:3]:
-                fig, ax = plt.subplots(figsize=(12, 8))
-                fig.patch.set_facecolor('#FFFFFF')
-                ax.set_facecolor('#F8F8F8')
-                
-                # Границы
-                ax.add_patch(MplPolygon(
-                    [(0, 0), (sheet.width, 0), (sheet.width, sheet.height), (0, sheet.height)],
-                    fill=False, edgecolor='red', linewidth=2, linestyle='--'
-                ))
-                
-                # Детали
-                if sheet.parts:
-                    colors = plt.cm.tab20(np.linspace(0, 1, len(sheet.parts)))
-                    for i, part in enumerate(sheet.parts):
-                        coords = list(part.geometry.exterior.coords)
-                        if len(coords) > 2:
-                            ax.add_patch(MplPolygon(
-                                coords, facecolor=colors[i % len(colors)], 
-                                edgecolor='darkblue', alpha=0.7, linewidth=1
-                            ))
-                            centroid = part.geometry.centroid
-                            ax.text(centroid.x, centroid.y, str(part.part_id),
-                                   ha='center', va='center', fontsize=8, fontweight='bold')
-                
-                ax.set_xlim(-50, sheet.width + 50)
-                ax.set_ylim(-50, sheet.height + 50)
-                ax.set_aspect('equal')
-                ax.grid(True, alpha=0.3)
-                ax.set_title(f"Лист #{sheet.sheet_number} — {len(sheet.parts)} деталей — Эффективность: {sheet.efficiency:.1f}%",
-                           fontsize=12, fontweight='bold')
-                ax.set_xlabel("X (мм)")
-                ax.set_ylabel("Y (мм)")
-                
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
+            # Настройки визуализации
+            col_viz1, col_viz2 = st.columns([1, 3])
+            with col_viz1:
+                show_all = st.checkbox("Показать все листы", value=False)
+                show_labels = st.checkbox("Показать номера деталей", value=True)
             
-            if len(result.sheets) > 3:
-                st.info(f"... и еще {len(result.sheets) - 3} листов")
+            sheets_to_show = result.sheets if show_all else result.sheets[:5]
+            
+            for sheet in sheets_to_show:
+                with st.expander(f"📄 Лист #{sheet.sheet_number}", expanded=(sheet.sheet_number == 1)):
+                    
+                    # Статистика листа
+                    col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+                    with col_s1:
+                        st.metric("Деталей", len(sheet.parts))
+                    with col_s2:
+                        st.metric("Использовано", f"{sheet.used_area/1e6:.3f} м²")
+                    with col_s3:
+                        st.metric("Отходы", f"{sheet.waste_area/1e6:.3f} м²")
+                    with col_s4:
+                        st.metric("Эффективность", f"{sheet.efficiency:.1f}%")
+                    
+                    # Визуализация
+                    fig, ax = plt.subplots(figsize=(14, 9))
+                    fig.patch.set_facecolor('#FFFFFF')
+                    ax.set_facecolor('#F5F5F5')
+                    
+                    # Границы листа
+                    sheet_boundary = MplPolygon(
+                        [(0, 0), (sheet.width, 0), (sheet.width, sheet.height), (0, sheet.height)],
+                        fill=False, 
+                        edgecolor='red', 
+                        linewidth=3, 
+                        linestyle='--',
+                        label='Граница листа'
+                    )
+                    ax.add_patch(sheet_boundary)
+                    
+                    # Детали
+                    if sheet.parts:
+                        num_colors = max(20, len(sheet.parts))
+                        colors = plt.cm.tab20(np.linspace(0, 1, num_colors))
+                        
+                        for i, part in enumerate(sheet.parts):
+                            coords = list(part.geometry.exterior.coords)
+                            if len(coords) > 2:
+                                part_polygon = MplPolygon(
+                                    coords, 
+                                    facecolor=colors[i % len(colors)], 
+                                    edgecolor='darkblue', 
+                                    alpha=0.7, 
+                                    linewidth=1.5
+                                )
+                                ax.add_patch(part_polygon)
+                                
+                                # Номер детали
+                                if show_labels:
+                                    centroid = part.geometry.centroid
+                                    ax.text(
+                                        centroid.x, centroid.y, 
+                                        str(part.part_id),
+                                        ha='center', va='center', 
+                                        fontsize=9, fontweight='bold',
+                                        bbox=dict(
+                                            boxstyle='round,pad=0.4', 
+                                            facecolor='white', 
+                                            edgecolor='black',
+                                            alpha=0.9
+                                        )
+                                    )
+                    
+                    ax.set_xlim(-100, sheet.width + 100)
+                    ax.set_ylim(-100, sheet.height + 100)
+                    ax.set_aspect('equal')
+                    ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+                    ax.set_title(
+                        f"Лист #{sheet.sheet_number} — {len(sheet.parts)} деталей — "
+                        f"Эффективность: {sheet.efficiency:.1f}%",
+                        fontsize=14, fontweight='bold', pad=20
+                    )
+                    ax.set_xlabel("X (мм)", fontsize=12)
+                    ax.set_ylabel("Y (мм)", fontsize=12)
+                    
+                    # Легенда
+                    from matplotlib.patches import Patch
+                    legend_elements = [
+                        Patch(facecolor='lightblue', alpha=0.7, 
+                              edgecolor='darkblue', label=f'Детали ({len(sheet.parts)} шт)'),
+                        Patch(facecolor='none', edgecolor='red', 
+                              linestyle='--', linewidth=2, label='Границы листа')
+                    ]
+                    ax.legend(handles=legend_elements, loc='upper right', fontsize=11)
+                    
+                    plt.tight_layout()
+                    st.pyplot(fig, use_container_width=True)
+                    plt.close(fig)
+            
+            if len(result.sheets) > 5 and not show_all:
+                st.info(f"ℹ️ Показано 5 из {len(result.sheets)} листов. "
+                       f"Включите 'Показать все листы' для полного просмотра.")
 
 
 # ---------------------------------------------------------------------------
@@ -887,5 +1266,11 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("Модуль оптимизации раскроя загружен успешно")
+    print("=" * 70)
+    print("Модуль оптимизации раскроя v2.5 (ИСПРАВЛЕННАЯ ВЕРСИЯ)")
+    print("=" * 70)
     print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
+    if SHAPELY_AVAILABLE:
+        from shapely import __version__ as shapely_version
+        print(f"Версия Shapely: {shapely_version}")
+    print("=" * 70)
