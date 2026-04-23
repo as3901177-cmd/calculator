@@ -369,6 +369,7 @@ class AdvancedNestingOptimizer:
                     part_id += 1
 
                 # T2
+                if placed >= quantity_remaining: break
                 t2 = _make_poly(_offset_verts(params.r, dx, dy))
                 if _fits(t2, self.sheet_width, self.sheet_height):
                     sheet.parts.append(PlacedPart(
@@ -502,6 +503,8 @@ def render_nesting_optimizer_tab(objects_data: Any = None):
     """Основная функция для Streamlit вкладки."""
     try:
         import streamlit as st
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import Polygon as MplPolygon
 
         st.title("🔧 Оптимизатор Раскроя")
 
@@ -512,7 +515,7 @@ def render_nesting_optimizer_tab(objects_data: Any = None):
         st.success("✅ Модуль загружен успешно")
 
         if objects_data is None:
-            st.warning("Данные объектов не переданы.")
+            st.warning("⚠️ Данные объектов не переданы.")
             return
 
         if not isinstance(objects_data, list):
@@ -540,33 +543,171 @@ def render_nesting_optimizer_tab(objects_data: Any = None):
 
         st.dataframe(table_data, use_container_width=True)
 
-        st.subheader("⚙️ Параметры листа")
-        col1, col2, col3 = st.columns(3)
+        st.subheader("⚙️ Параметры оптимизации")
+        
+        col1, col2 = st.columns(2)
         with col1:
-            sheet_width = st.number_input("Ширина листа (мм)", value=3000.0, step=50.0)
+            sheet_width = st.number_input("Ширина листа (мм)", value=3000.0, step=50.0, min_value=100.0)
+            sheet_height = st.number_input("Высота листа (мм)", value=1500.0, step=50.0, min_value=100.0)
         with col2:
-            sheet_height = st.number_input("Высота листа (мм)", value=1500.0, step=50.0)
-        with col3:
-            spacing = st.number_input("Отступ между деталями (мм)", value=10.0, min_value=0.0)
+            spacing = st.number_input("Отступ между деталями (мм)", value=10.0, min_value=0.0, step=1.0)
+            quantity = st.number_input("Количество деталей", value=10, min_value=1, max_value=1000, step=1)
+
+        # Выбор детали для раскроя
+        valid_geoms = [(i, g) for i, g in enumerate(shapely_geoms) if g is not None]
+        
+        if not valid_geoms:
+            st.error("❌ Нет валидных геометрий для оптимизации")
+            return
+
+        selected_idx = st.selectbox(
+            "Выберите деталь для раскроя:",
+            options=[i for i, _ in valid_geoms],
+            format_func=lambda i: f"Объект {i+1} ({get_polygon_type(shapely_geoms[i])})"
+        )
+
+        selected_geom = shapely_geoms[selected_idx]
+
+        # Информация о выбранной детали
+        bounds = selected_geom.bounds
+        width = bounds[2] - bounds[0]
+        height = bounds[3] - bounds[1]
+        
+        st.info(f"**Выбрана деталь:** {get_polygon_type(selected_geom)} | "
+                f"**Площадь:** {selected_geom.area:.2f} мм² | "
+                f"**Габариты:** {width:.1f} × {height:.1f} мм")
 
         if st.button("🚀 Запустить оптимизацию", type="primary"):
-            with st.spinner("Выполняется оптимизация..."):
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            status_text.text("⏳ Выполняется оптимизация...")
+            progress_bar.progress(25)
+            
+            try:
                 optimizer = AdvancedNestingOptimizer(
                     sheet_width=sheet_width,
                     sheet_height=sheet_height,
                     spacing=spacing
                 )
-
-                if shapely_geoms and shapely_geoms[0]:
-                    result = optimizer.optimize(shapely_geoms[0], quantity=10)
-                    st.success(f"Размещено деталей: **{result.parts_placed}** из {result.total_parts}")
-                    st.info(f"Алгоритм: {result.algorithm_used}")
+                
+                progress_bar.progress(50)
+                result = optimizer.optimize(selected_geom, quantity=quantity)
+                progress_bar.progress(100)
+                
+                status_text.text("✅ Оптимизация завершена!")
+                
+                # Результаты
+                st.markdown("---")
+                st.subheader("📊 Результаты оптимизации")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Размещено деталей", f"{result.parts_placed}/{result.total_parts}")
+                with col2:
+                    st.metric("Использовано листов", len(result.sheets))
+                with col3:
                     st.metric("Средняя эффективность", f"{result.average_efficiency:.1f}%")
+                with col4:
+                    waste_percent = (result.total_waste / result.total_material_used * 100) if result.total_material_used > 0 else 0
+                    st.metric("Отходы", f"{waste_percent:.1f}%")
 
+                st.info(f"**Алгоритм:** {result.algorithm_used}")
+
+                # Детализация по листам
+                if result.sheets:
+                    st.markdown("### 📋 Детализация по листам")
+                    
                     for sheet in result.sheets:
-                        st.write(f"**Лист {sheet.sheet_number}** — "
-                               f"{len(sheet.parts)} деталей, эффективность {sheet.efficiency:.1f}%")
+                        with st.expander(f"📄 Лист #{sheet.sheet_number} — {len(sheet.parts)} деталей ({sheet.efficiency:.1f}% эффективность)", expanded=True):
+                            col_a, col_b, col_c = st.columns(3)
+                            with col_a:
+                                st.metric("Деталей на листе", len(sheet.parts))
+                            with col_b:
+                                st.metric("Использовано", f"{sheet.used_area:.0f} мм²")
+                            with col_c:
+                                st.metric("Отходы", f"{sheet.waste_area:.0f} мм²")
+                            
+                            # Визуализация листа
+                            fig, ax = plt.subplots(figsize=(14, 8))
+                            
+                            # Границы листа
+                            ax.add_patch(MplPolygon(
+                                [(0, 0), (sheet.width, 0), (sheet.width, sheet.height), (0, sheet.height)],
+                                fill=False, edgecolor='black', linewidth=2.5, label='Границы листа', linestyle='--'
+                            ))
+                            
+                            # Размещенные детали
+                            import numpy as np
+                            colors = plt.cm.tab20(np.linspace(0, 1, len(sheet.parts)))
+                            
+                            for i, part in enumerate(sheet.parts):
+                                coords = list(part.geometry.exterior.coords)
+                                ax.add_patch(MplPolygon(
+                                    coords, 
+                                    facecolor=colors[i], 
+                                    edgecolor='darkblue', 
+                                    alpha=0.7,
+                                    linewidth=1.5
+                                ))
+                                # Номер детали
+                                centroid = part.geometry.centroid
+                                ax.text(centroid.x, centroid.y, str(part.part_id), 
+                                       ha='center', va='center', fontsize=9, fontweight='bold',
+                                       bbox=dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.8))
+                            
+                            ax.set_xlim(-100, sheet.width + 100)
+                            ax.set_ylim(-100, sheet.height + 100)
+                            ax.set_aspect('equal')
+                            ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+                            ax.set_title(f"Лист #{sheet.sheet_number} — {len(sheet.parts)} деталей — Эффективность: {sheet.efficiency:.1f}%", 
+                                       fontsize=14, fontweight='bold', pad=15)
+                            ax.set_xlabel("X (мм)", fontsize=11)
+                            ax.set_ylabel("Y (мм)", fontsize=11)
+                            
+                            # Добавляем легенду
+                            from matplotlib.patches import Patch
+                            legend_elements = [
+                                Patch(facecolor='gray', alpha=0.7, label=f'Детали ({len(sheet.parts)} шт)'),
+                                Patch(facecolor='white', edgecolor='black', linestyle='--', label='Границы листа')
+                            ]
+                            ax.legend(handles=legend_elements, loc='upper right', fontsize=10)
+                            
+                            plt.tight_layout()
+                            st.pyplot(fig)
+                            plt.close()
+                
+                # Предупреждения
+                if result.parts_not_placed > 0:
+                    st.warning(f"⚠️ **{result.parts_not_placed}** деталей не удалось разместить. "
+                             f"Попробуйте увеличить размер листа или уменьшить отступы.")
+                
+                if result.parts_placed == 0:
+                    st.error("❌ Ни одна деталь не размещена! Проверьте размеры листа и детали.")
+                    st.write(f"**Габариты детали:** {width:.1f} × {height:.1f} мм")
+                    st.write(f"**Размер листа:** {sheet_width} × {sheet_height} мм")
+                    
+                    if width > sheet_width or height > sheet_height:
+                        st.error("🔴 Деталь больше листа! Увеличьте размер листа.")
+
+            except Exception as e:
+                st.error(f"❌ Ошибка оптимизации: {e}")
+                logger.exception("Optimization error")
+                import traceback
+                with st.expander("🐛 Детали ошибки (для разработчиков)"):
+                    st.code(traceback.format_exc())
 
     except Exception as e:
-        st.error(f"Ошибка: {e}")
+        st.error(f"❌ Критическая ошибка: {e}")
         logger.exception("Error in render_nesting_optimizer_tab")
+        import traceback
+        st.code(traceback.format_exc())
+
+
+# ---------------------------------------------------------------------------
+# Точка входа для тестирования
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    print("Модуль оптимизации раскроя загружен успешно")
+    print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
