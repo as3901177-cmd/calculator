@@ -7,39 +7,28 @@
   Алгоритм перебирает все три стороны, выбирает ту, что даёт
   параллелограмм с наименьшей высотой (= наиболее «плоский» → больше рядов),
   и строит тесселяцию из таких параллелограммов.
-
-  Схема (сторона AB):
-
-      C                    C'
-     / \\                 //\\
-    /   \\     →         //  \\
-   A-----B         A---B---A'
-                        \\   /
-                         \\ /
-                          C
-
-  Параллелограмм A-B-C'-C — шагаем по нему как по тайлу.
-
-Шаги _optimize_triangles:
-  1. _find_best_pairing_edge  — выбрать сторону с min высотой параллелограмма.
-  2. _build_tessellation_params — вычислить координаты T1/T2 и векторы шага.
-  3. _fill_sheet_with_tessellation — заполнить лист строками тайлов.
-  4. Перебираем 4 поворота (0°,90°,180°,270°) — берём лучший.
 """
 
 import math
 from typing import List, Optional, Tuple
 from dataclasses import dataclass, field
-
-from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.affinity import translate, rotate
 import logging
+
+# Безопасный импорт Shapely
+try:
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.affinity import translate, rotate
+    SHAPELY_AVAILABLE = True
+except ImportError:
+    SHAPELY_AVAILABLE = False
+    ShapelyPolygon = None
+    print("Warning: shapely not installed. Install with: pip install shapely")
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Типы данных (замените на реальные из вашего проекта)
+# Типы данных
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -49,7 +38,7 @@ class PlacedPart:
     x: float
     y: float
     rotation: float
-    geometry: ShapelyPolygon
+    geometry: 'ShapelyPolygon'
     bounding_box: tuple
 
 
@@ -83,7 +72,10 @@ class NestingResult:
     algorithm_used: str
 
 
-def get_polygon_type(geom: ShapelyPolygon) -> str:
+def get_polygon_type(geom: 'ShapelyPolygon') -> str:
+    """Определяет тип полигона."""
+    if not SHAPELY_AVAILABLE:
+        return "polygon"
     coords = list(geom.exterior.coords)[:-1]
     if len(coords) == 3:
         return "triangle"
@@ -95,6 +87,7 @@ def get_polygon_type(geom: ShapelyPolygon) -> str:
 def get_optimal_rotations_for_shape(
     shape_type: Optional[str], rotation_step: float
 ) -> List[float]:
+    """Возвращает оптимальные углы поворота для типа фигуры."""
     if shape_type == "quadrilateral":
         return [0.0, 90.0]
     angles, a = [], 0.0
@@ -111,16 +104,20 @@ def get_optimal_rotations_for_shape(
 Vec2 = Tuple[float, float]
 
 
-def _tri_vertices(geom: ShapelyPolygon) -> List[Vec2]:
+def _tri_vertices(geom: 'ShapelyPolygon') -> List[Vec2]:
+    """Извлекает вершины треугольника."""
     coords = list(geom.exterior.coords)[:-1]
-    assert len(coords) == 3
+    assert len(coords) == 3, "Геометрия должна быть треугольником"
     return [(float(x), float(y)) for x, y in coords]
 
 
 def _reflect_over_edge(p: Vec2, a: Vec2, b: Vec2) -> Vec2:
     """Отражает точку p через прямую AB."""
     dx, dy = b[0] - a[0], b[1] - a[1]
-    t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)
+    length_sq = dx * dx + dy * dy
+    if length_sq < 1e-12:
+        return p
+    t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / length_sq
     fx, fy = a[0] + t * dx, a[1] + t * dy
     return (2 * fx - p[0], 2 * fy - p[1])
 
@@ -142,7 +139,6 @@ def _para_height(a: Vec2, b: Vec2, c: Vec2) -> float:
 def _find_best_pairing_edge(verts: List[Vec2]) -> Tuple[int, int, int]:
     """
     Выбирает сторону (ia, ib, ic) с минимальной высотой параллелограмма.
-    Чем меньше высота → тем «шире» строка → тем больше рядов влезает.
     """
     edges = [(0, 1, 2), (1, 2, 0), (2, 0, 1)]
     return min(
@@ -154,29 +150,15 @@ def _find_best_pairing_edge(verts: List[Vec2]) -> Tuple[int, int, int]:
 @dataclass
 class TessellationParams:
     """Параметры тайла для тесселяции."""
-    # Вершины T1 (оригинал), нормированные так, что A = (0, 0)
-    v: List[Vec2]   # [A, B, C]
-    # Вершины T2 (отражение через AB)
-    r: List[Vec2]   # [B, A, C']
-    # Вектор шага между тайлами в строке (= вектор AB)
-    vec_col: Vec2
-    # Вектор шага между строками (= вектор AC)
-    vec_row: Vec2
-    # Высота параллелограмма (без spacing)
-    para_height: float
+    v: List[Vec2]       # [A, B, C] - вершины T1
+    r: List[Vec2]       # [B, A, C'] - вершины T2 (отражение)
+    vec_col: Vec2       # вектор шага между тайлами в строке
+    vec_row: Vec2       # вектор шага между строками
+    para_height: float  # высота параллелограмма
 
 
-def _build_tessellation_params(geom: ShapelyPolygon) -> TessellationParams:
-    """
-    Строит параметры тесселяции.
-
-    Нормализация: A (начало лучшей стороны) сдвигается в (0, 0).
-    T1 = A, B, C
-    T2 = B, A, C'  (C' = отражение C через AB)
-
-    vec_col = B — шаг вдоль строки (один тайл = ширина AB).
-    vec_row = C — шаг между строками (высота = |Cy|).
-    """
+def _build_tessellation_params(geom: 'ShapelyPolygon') -> TessellationParams:
+    """Строит параметры тесселяции для треугольника."""
     verts = _tri_vertices(geom)
     ia, ib, ic = _find_best_pairing_edge(verts)
     a, b, c = verts[ia], verts[ib], verts[ic]
@@ -200,14 +182,19 @@ def _build_tessellation_params(geom: ShapelyPolygon) -> TessellationParams:
 
 
 def _offset_verts(verts: List[Vec2], dx: float, dy: float) -> List[Vec2]:
+    """Смещает вершины на заданный вектор."""
     return [(x + dx, y + dy) for x, y in verts]
 
 
-def _make_poly(verts: List[Vec2]) -> ShapelyPolygon:
+def _make_poly(verts: List[Vec2]) -> 'ShapelyPolygon':
+    """Создаёт полигон из вершин."""
+    if not SHAPELY_AVAILABLE:
+        raise ImportError("shapely is required for polygon operations")
     return ShapelyPolygon(verts)
 
 
-def _fits(poly: ShapelyPolygon, sw: float, sh: float) -> bool:
+def _fits(poly: 'ShapelyPolygon', sw: float, sh: float) -> bool:
+    """Проверяет, помещается ли полигон в прямоугольник."""
     b = poly.bounds
     return b[0] >= -1e-6 and b[1] >= -1e-6 and b[2] <= sw + 1e-6 and b[3] <= sh + 1e-6
 
@@ -221,12 +208,7 @@ class AdvancedNestingOptimizer:
     """
     Продвинутый алгоритм раскроя с адаптивной стратегией.
 
-    Для ЛЮБЫХ треугольников (равносторонних, равнобедренных, разносторонних):
-      — строит тесселяцию через параллелограмм (пара T1+T2 по лучшей стороне)
-      — перебирает 4 поворота базового треугольника, берёт лучший
-      — эффективность стремится к теоретическому максимуму ~100%
-        (без spacing) или ~85–95% с учётом отступов между строками
-
+    Для ЛЮБЫХ треугольников: строит оптимальную тесселяцию.
     Для остальных фигур: Bottom-Left с перебором углов поворота.
     """
 
@@ -237,6 +219,11 @@ class AdvancedNestingOptimizer:
         spacing: float = 5.0,
         rotation_step: float = 15.0,
     ):
+        if not SHAPELY_AVAILABLE:
+            raise ImportError(
+                "shapely is required. Install with: pip install shapely"
+            )
+        
         self.sheet_width = sheet_width
         self.sheet_height = sheet_height
         self.spacing = spacing
@@ -248,7 +235,9 @@ class AdvancedNestingOptimizer:
     # Публичный метод
     # ------------------------------------------------------------------
 
-    def optimize(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
+    def optimize(
+        self, part_geometry: 'ShapelyPolygon', quantity: int
+    ) -> NestingResult:
         """Выполняет оптимизацию раскроя."""
         normalized = self._normalize_geometry(part_geometry)
         self.shape_type = get_polygon_type(normalized)
@@ -262,7 +251,7 @@ class AdvancedNestingOptimizer:
     # Нормализация
     # ------------------------------------------------------------------
 
-    def _normalize_geometry(self, geom: ShapelyPolygon) -> ShapelyPolygon:
+    def _normalize_geometry(self, geom: 'ShapelyPolygon') -> 'ShapelyPolygon':
         """Сдвигает центр bounding box в (0, 0)."""
         b = geom.bounds
         cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
@@ -273,14 +262,9 @@ class AdvancedNestingOptimizer:
     # ------------------------------------------------------------------
 
     def _optimize_triangles(
-        self, part_geometry: ShapelyPolygon, quantity: int
+        self, part_geometry: 'ShapelyPolygon', quantity: int
     ) -> NestingResult:
-        """
-        Тесселяция произвольного треугольника.
-
-        Перебирает 4 поворота (0°, 90°, 180°, 270°) — выбирает тот,
-        при котором на листе помещается максимальное количество деталей.
-        """
+        """Тесселяция произвольного треугольника с перебором поворотов."""
         best_result: Optional[NestingResult] = None
 
         for base_angle in [0.0, 90.0, 180.0, 270.0]:
@@ -297,7 +281,9 @@ class AdvancedNestingOptimizer:
             if params.para_height < 1e-6 or math.hypot(*params.vec_col) < 1e-6:
                 continue
 
-            result = self._place_tessellation(rotated, params, quantity, base_angle)
+            result = self._place_tessellation(
+                rotated, params, quantity, base_angle
+            )
 
             if best_result is None or result.parts_placed > best_result.parts_placed:
                 best_result = result
@@ -310,17 +296,17 @@ class AdvancedNestingOptimizer:
 
     def _place_tessellation(
         self,
-        part_geometry: ShapelyPolygon,
+        part_geometry: 'ShapelyPolygon',
         params: TessellationParams,
         quantity: int,
         base_angle: float,
     ) -> NestingResult:
-        """Заполняет листы тесселяцией, пока не разместим все детали."""
+        """Заполняет листы тесселяцией."""
         sheets: List[Sheet] = []
         parts_placed = 0
         part_area = part_geometry.area
 
-        # Вычисляем геометрию тайла (bounding box обоих треугольников)
+        # Вычисляем геометрию тайла
         all_v = params.v + params.r
         tile_min_x = min(p[0] for p in all_v)
         tile_min_y = min(p[1] for p in all_v)
@@ -329,11 +315,7 @@ class AdvancedNestingOptimizer:
         tile_w = tile_max_x - tile_min_x
         tile_h = tile_max_y - tile_min_y
 
-        # Высота строки с отступом
         row_height = tile_h + self.spacing
-
-        # Шаг по колонке: ширина тайла (два треугольника рядом)
-        # Для корректной тесселяции шаг = длина стороны стыковки
         col_step = math.hypot(params.vec_col[0], params.vec_col[1])
 
         usable_w = self.sheet_width - 2 * self.spacing
@@ -373,16 +355,20 @@ class AdvancedNestingOptimizer:
                 parts_placed += n
                 part_num += n
                 new_sheet_attempts = 0
-                current_sheet = None  # переходим на новый лист
+                current_sheet = None
             else:
                 current_sheet = None
                 if new_sheet_attempts >= 2:
-                    logger.warning(f"Не удалось разместить деталь #{part_num} — стоп.")
+                    logger.warning(
+                        f"Не удалось разместить деталь #{part_num} — стоп."
+                    )
                     break
 
         total_material = sum(s.total_area for s in sheets)
         total_waste = sum(s.waste_area for s in sheets)
-        avg_eff = sum(s.efficiency for s in sheets) / len(sheets) if sheets else 0.0
+        avg_eff = (
+            sum(s.efficiency for s in sheets) / len(sheets) if sheets else 0.0
+        )
 
         return NestingResult(
             sheets=sheets,
@@ -409,17 +395,7 @@ class AdvancedNestingOptimizer:
         part_area: float,
         start_id: int,
     ) -> int:
-        """
-        Заполняет один лист тесселяцией строками тайлов (T1 + T2).
-
-        Размещение:
-          • T1 и T2 стыкуются вплотную (отступ = 0) — они образуют параллелограмм.
-          • Между строками — self.spacing.
-          • Нечётные строки смещаются на col_step / 2 по X (кирпичная раскладка)
-            для лучшего заполнения при разносторонних треугольниках.
-
-        Возвращает количество размещённых деталей.
-        """
+        """Заполняет один лист тесселяцией строками тайлов."""
         placed = 0
         part_id = start_id
 
@@ -427,51 +403,59 @@ class AdvancedNestingOptimizer:
             if placed >= quantity_remaining:
                 break
 
-            # Смещение строки по Y
             dy = self.spacing + row * row_height - tile_min_y
-
-            # Кирпичное смещение по X для нечётных строк
             dx_extra = (col_step / 2) if (row % 2 == 1) else 0.0
 
             for col in range(tiles_per_row):
                 if placed >= quantity_remaining:
                     break
 
-                # Смещение тайла по X
                 dx = self.spacing + col * col_step + dx_extra - tile_min_x
 
-                # ── T1: оригинальный треугольник ──────────────────────
+                # T1: оригинальный треугольник
                 t1 = _make_poly(_offset_verts(params.v, dx, dy))
 
                 if _fits(t1, self.sheet_width, self.sheet_height):
-                    sheet.parts.append(PlacedPart(
-                        part_id=part_id,
-                        part_name=f"Деталь #{part_id}",
-                        x=dx, y=dy, rotation=0.0,
-                        geometry=t1,
-                        bounding_box=t1.bounds,
-                    ))
+                    sheet.parts.append(
+                        PlacedPart(
+                            part_id=part_id,
+                            part_name=f"Деталь #{part_id}",
+                            x=dx,
+                            y=dy,
+                            rotation=0.0,
+                            geometry=t1,
+                            bounding_box=t1.bounds,
+                        )
+                    )
                     sheet.used_area += part_area
-                    sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
+                    sheet.efficiency = (
+                        sheet.used_area / sheet.total_area
+                    ) * 100
                     placed += 1
                     part_id += 1
 
                     if placed >= quantity_remaining:
                         break
 
-                # ── T2: отражённый треугольник ────────────────────────
+                # T2: отражённый треугольник
                 t2 = _make_poly(_offset_verts(params.r, dx, dy))
 
                 if _fits(t2, self.sheet_width, self.sheet_height):
-                    sheet.parts.append(PlacedPart(
-                        part_id=part_id,
-                        part_name=f"Деталь #{part_id}",
-                        x=dx, y=dy, rotation=180.0,
-                        geometry=t2,
-                        bounding_box=t2.bounds,
-                    ))
+                    sheet.parts.append(
+                        PlacedPart(
+                            part_id=part_id,
+                            part_name=f"Деталь #{part_id}",
+                            x=dx,
+                            y=dy,
+                            rotation=180.0,
+                            geometry=t2,
+                            bounding_box=t2.bounds,
+                        )
+                    )
                     sheet.used_area += part_area
-                    sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
+                    sheet.efficiency = (
+                        sheet.used_area / sheet.total_area
+                    ) * 100
                     placed += 1
                     part_id += 1
 
@@ -482,7 +466,7 @@ class AdvancedNestingOptimizer:
     # ------------------------------------------------------------------
 
     def _optimize_general(
-        self, part_geometry: ShapelyPolygon, quantity: int
+        self, part_geometry: 'ShapelyPolygon', quantity: int
     ) -> NestingResult:
         """Bottom-Left упаковка для произвольных фигур."""
         self.optimal_rotations = get_optimal_rotations_for_shape(
@@ -509,12 +493,16 @@ class AdvancedNestingOptimizer:
                     sheets.append(new_sheet)
                     parts_placed += 1
                 else:
-                    logger.warning(f"Не удалось разместить деталь #{part_num} — стоп.")
+                    logger.warning(
+                        f"Не удалось разместить деталь #{part_num} — стоп."
+                    )
                     break
 
         total_material = sum(s.total_area for s in sheets)
         total_waste = sum(s.waste_area for s in sheets)
-        avg_eff = sum(s.efficiency for s in sheets) / len(sheets) if sheets else 0.0
+        avg_eff = (
+            sum(s.efficiency for s in sheets) / len(sheets) if sheets else 0.0
+        )
 
         return NestingResult(
             sheets=sheets,
@@ -528,8 +516,9 @@ class AdvancedNestingOptimizer:
         )
 
     def _try_place_general(
-        self, sheet: Sheet, part_id: int, geometry: ShapelyPolygon
+        self, sheet: Sheet, part_id: int, geometry: 'ShapelyPolygon'
     ) -> bool:
+        """Пытается разместить деталь на листе методом Bottom-Left."""
         best = None
         best_score = float("inf")
 
@@ -552,18 +541,25 @@ class AdvancedNestingOptimizer:
 
         x, y, angle, final = best
         placed = translate(final, xoff=x, yoff=y)
-        sheet.parts.append(PlacedPart(
-            part_id=part_id, part_name=f"Деталь #{part_id}",
-            x=x, y=y, rotation=angle,
-            geometry=placed, bounding_box=placed.bounds,
-        ))
+        sheet.parts.append(
+            PlacedPart(
+                part_id=part_id,
+                part_name=f"Деталь #{part_id}",
+                x=x,
+                y=y,
+                rotation=angle,
+                geometry=placed,
+                bounding_box=placed.bounds,
+            )
+        )
         sheet.used_area += geometry.area
         sheet.efficiency = (sheet.used_area / sheet.total_area) * 100
         return True
 
     def _bottom_left_positions(
-        self, sheet: Sheet, geometry: ShapelyPolygon
+        self, sheet: Sheet, geometry: 'ShapelyPolygon'
     ) -> List[Tuple[float, float]]:
+        """Генерирует кандидатов для размещения по методу Bottom-Left."""
         b = geometry.bounds
         pw, ph = b[2] - b[0], b[3] - b[1]
         positions: List[Tuple[float, float]] = []
@@ -573,7 +569,9 @@ class AdvancedNestingOptimizer:
             return positions
 
         step = 5
-        for x in range(int(self.spacing), int(self.sheet_width - pw), step):
+        for x in range(
+            int(self.spacing), int(self.sheet_width - pw), step
+        ):
             positions.append((x - b[0], self.spacing - b[1]))
 
         for part in sheet.parts:
@@ -594,7 +592,8 @@ class AdvancedNestingOptimizer:
         positions.sort(key=lambda p: (p[1], p[0]))
         return positions
 
-    def _score(self, sheet: Sheet, geometry: ShapelyPolygon) -> float:
+    def _score(self, sheet: Sheet, geometry: 'ShapelyPolygon') -> float:
+        """Вычисляет оценку позиции (меньше = лучше)."""
         b = geometry.bounds
         score = b[1] * 1000 + b[0]
         if sheet.parts:
@@ -603,11 +602,18 @@ class AdvancedNestingOptimizer:
                 score -= (100 - min_d) * 10
         return score
 
-    def _fits_on_sheet(self, geometry: ShapelyPolygon) -> bool:
+    def _fits_on_sheet(self, geometry: 'ShapelyPolygon') -> bool:
+        """Проверяет, помещается ли геометрия на лист."""
         b = geometry.bounds
-        return b[0] >= 0 and b[1] >= 0 and b[2] <= self.sheet_width and b[3] <= self.sheet_height
+        return (
+            b[0] >= 0
+            and b[1] >= 0
+            and b[2] <= self.sheet_width
+            and b[3] <= self.sheet_height
+        )
 
-    def _can_place(self, sheet: Sheet, geometry: ShapelyPolygon) -> bool:
+    def _can_place(self, sheet: Sheet, geometry: 'ShapelyPolygon') -> bool:
+        """Проверяет возможность размещения без пересечений."""
         if not self._fits_on_sheet(geometry):
             return False
         for part in sheet.parts:
