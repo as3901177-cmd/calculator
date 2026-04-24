@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 8.2 DEBUG - Полная диагностика заполнения листа.
+Версия 9.0 ULTIMATE - Чередующиеся ряды для максимальной плотности.
 """
 
 import math
@@ -505,9 +505,11 @@ class AdvancedNestingOptimizer:
 
     def _optimize_triangle_parquet(self, part_geometry: ShapelyPolygon, quantity: int, original_area: Optional[float] = None) -> NestingResult:
         """
-        🔺 ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ V8.2 DEBUG
+        🔺 ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ V9.0 ULTIMATE
         
-        С полной диагностикой всех вычислений.
+        Чередующиеся ряды для максимальной плотности:
+        - Чётные ряды: начинаются с ▲ (на основании)
+        - Нечётные ряды: начинаются с ▼ (на вершине)
         """
         
         pattern = create_parquet_pattern(part_geometry)
@@ -521,59 +523,24 @@ class AdvancedNestingOptimizer:
         tri_up, tri_down, base_width, height = pattern
         part_area = original_area if original_area else part_geometry.area
 
-        print(f"\n{'='*70}")
-        print(f"🔺 ПАРКЕТНЫЙ ПАТТЕРН:")
-        print(f"{'='*70}")
-        print(f"  Ширина базы треугольника: {base_width:.2f} мм")
-        print(f"  Высота треугольника: {height:.2f} мм")
-        print(f"  Площадь детали: {part_area:.2f} мм²")
+        print(f"\n🔺 Паркетный паттерн:")
+        print(f"  Ширина базы: {base_width:.2f} мм")
+        print(f"  Высота: {height:.2f} мм")
 
         sp = self.spacing
         usable_w = self.sheet_width - 2 * sp
         usable_h = self.sheet_height - 2 * sp
 
-        print(f"\n{'='*70}")
-        print(f"📐 ПАРАМЕТРЫ ЛИСТА:")
-        print(f"{'='*70}")
-        print(f"  Размер листа: {self.sheet_width:.0f} x {self.sheet_height:.0f} мм")
-        print(f"  Отступ (spacing): {sp:.2f} мм")
-        print(f"  Полезная ширина: {usable_w:.2f} мм")
-        print(f"  Полезная высота: {usable_h:.2f} мм")
-
-        # ✅ КЛЮЧЕВОЙ РАСЧЁТ
         triangle_width = base_width / 2
-        
-        print(f"\n{'='*70}")
-        print(f"🔢 КЛЮЧЕВЫЕ ВЫЧИСЛЕНИЯ:")
-        print(f"{'='*70}")
-        print(f"  Ширина ОДНОГО треугольника: {triangle_width:.2f} мм")
-        print(f"  (это base_width / 2 = {base_width:.2f} / 2)")
-        
-        # Сколько треугольников влезает по ширине
-        triangles_per_row_raw = usable_w / triangle_width
-        triangles_per_row = max(1, int(triangles_per_row_raw))
-        
-        print(f"\n  Расчёт треугольников в ряду:")
-        print(f"    usable_w / triangle_width = {usable_w:.2f} / {triangle_width:.2f} = {triangles_per_row_raw:.2f}")
-        print(f"    int(...) = {triangles_per_row}")
-        
-        # Сколько рядов влезает по высоте
-        rows_raw = usable_h / (height + sp)
-        rows = max(1, int(rows_raw))
-        
-        print(f"\n  Расчёт количества рядов:")
-        print(f"    usable_h / (height + spacing) = {usable_h:.2f} / ({height:.2f} + {sp:.2f}) = {usable_h:.2f} / {height + sp:.2f} = {rows_raw:.2f}")
-        print(f"    int(...) = {rows}")
+        triangles_per_row = max(1, int(usable_w / triangle_width))
+        rows = max(1, int(usable_h / (height + sp)))
 
         capacity_per_sheet = triangles_per_row * rows
 
-        print(f"\n{'='*70}")
-        print(f"📊 ИТОГОВАЯ ЁМКОСТЬ ЛИСТА:")
-        print(f"{'='*70}")
+        print(f"\n📐 Сетка:")
         print(f"  Треугольников в ряду: {triangles_per_row}")
-        print(f"  Рядов на листе: {rows}")
-        print(f"  Всего треугольников на лист: {capacity_per_sheet}")
-        print(f"{'='*70}")
+        print(f"  Рядов: {rows}")
+        print(f"  Ёмкость листа: {capacity_per_sheet}")
 
         sheets: List[Sheet] = []
         parts_placed = 0
@@ -587,9 +554,8 @@ class AdvancedNestingOptimizer:
             current_sheet = new_sheet()
             sheets.append(current_sheet)
             
-            print(f"\n{'='*70}")
-            print(f"📄 ЛИСТ #{current_sheet.sheet_number}")
-            print(f"{'='*70}")
+            if len(sheets) > 1:
+                print(f"\n📄 Лист #{current_sheet.sheet_number}")
 
             sheet_parts_placed = 0
             
@@ -597,76 +563,52 @@ class AdvancedNestingOptimizer:
                 if part_id > quantity:
                     break
 
+                # ✅ КЛЮЧЕВОЕ НОВОВВЕДЕНИЕ: чередование типа ряда
+                # Чётные ряды (0, 2, 4...): начинаются с ▲
+                # Нечётные ряды (1, 3, 5...): начинаются с ▼
+                row_starts_with_up = (row_idx % 2 == 0)
+
                 # Y-позиция базы ряда
                 y_base = sp + row_idx * (height + sp)
 
-                # ✅ DEBUG: проверка границ по Y
-                y_max = y_base + height
-                
-                print(f"\n  Ряд {row_idx + 1}/{rows}:")
-                print(f"    y_base = sp + row_idx * (height + sp)")
-                print(f"    y_base = {sp:.2f} + {row_idx} * ({height:.2f} + {sp:.2f})")
-                print(f"    y_base = {sp:.2f} + {row_idx} * {height + sp:.2f}")
-                print(f"    y_base = {y_base:.2f} мм")
-                print(f"    y_max (верх треугольника) = {y_max:.2f} мм")
-                print(f"    Лимит листа = {self.sheet_height - sp:.2f} мм")
-
                 if y_base + height > self.sheet_height - sp:
-                    print(f"    ❌ Ряд выходит за границы! ({y_max:.2f} > {self.sheet_height - sp:.2f})")
                     break
-                else:
-                    print(f"    ✅ Ряд в пределах листа")
 
-                # Смещение для шахматного порядка
-                row_offset = (row_idx % 2) * triangle_width
-                
-                print(f"    Смещение ряда (шахматный порядок): {row_offset:.2f} мм")
-
-                row_placed = 0
                 for col_idx in range(triangles_per_row):
                     if part_id > quantity:
                         break
 
                     # X-позиция треугольника
-                    x_pos = sp + row_offset + col_idx * triangle_width
-                    x_max = x_pos + base_width
+                    x_pos = sp + col_idx * triangle_width
 
-                    # Чередование ▲▼
-                    is_up = (col_idx % 2 == 0)
-                    symbol = "▲" if is_up else "▼"
-
-                    # ✅ DEBUG: детальная проверка позиции
-                    if col_idx < 3 or col_idx >= triangles_per_row - 3:  # Показываем первые и последние
-                        print(f"\n      Позиция {col_idx + 1}/{triangles_per_row} ({symbol}):")
-                        print(f"        x_pos = sp + row_offset + col_idx * triangle_width")
-                        print(f"        x_pos = {sp:.2f} + {row_offset:.2f} + {col_idx} * {triangle_width:.2f}")
-                        print(f"        x_pos = {x_pos:.2f} мм")
-                        print(f"        x_max (правый край) = {x_max:.2f} мм")
-                        print(f"        Лимит листа = {self.sheet_width - sp:.2f} мм")
-
-                    # Проверка границ по X
                     if x_pos + base_width > self.sheet_width - sp:
-                        if col_idx < 3:
-                            print(f"        ❌ Выходит за границы! ({x_max:.2f} > {self.sheet_width - sp:.2f})")
                         break
 
+                    # ✅ ЧЕРЕДОВАНИЕ С УЧЁТОМ ТИПА РЯДА
+                    # Если ряд начинается с ▲: чётные позиции = ▲, нечётные = ▼
+                    # Если ряд начинается с ▼: чётные позиции = ▼, нечётные = ▲
+                    if row_starts_with_up:
+                        is_up = (col_idx % 2 == 0)
+                    else:
+                        is_up = (col_idx % 2 == 1)
+
                     if is_up:
+                        # ▲ вершиной вверх
                         placed_geom = translate(tri_up, xoff=x_pos, yoff=y_base)
+                        symbol = "▲"
                         rotation = 0
                     else:
+                        # ▼ вершиной вниз
                         placed_geom = translate(tri_down, xoff=x_pos, yoff=y_base + height)
+                        symbol = "▼"
                         rotation = 180
 
                     bounds = placed_geom.bounds
 
-                    # Финальная проверка границ
+                    # Проверка границ
                     if (bounds[0] < sp - 1e-6 or bounds[1] < sp - 1e-6 or
                         bounds[2] > self.sheet_width - sp + 1e-6 or
                         bounds[3] > self.sheet_height - sp + 1e-6):
-                        if col_idx < 3:
-                            print(f"        ❌ Не прошёл финальную проверку границ:")
-                            print(f"           bounds = [{bounds[0]:.2f}, {bounds[1]:.2f}, {bounds[2]:.2f}, {bounds[3]:.2f}]")
-                            print(f"           limits = [{sp:.2f}, {sp:.2f}, {self.sheet_width - sp:.2f}, {self.sheet_height - sp:.2f}]")
                         continue
 
                     # Размещаем
@@ -682,33 +624,23 @@ class AdvancedNestingOptimizer:
                     current_sheet.used_area += part_area
                     parts_placed += 1
                     sheet_parts_placed += 1
-                    row_placed += 1
                     part_id += 1
 
-                print(f"\n    📊 В ряду размещено: {row_placed} треугольников")
-
             usage_percent = (sheet_parts_placed / capacity_per_sheet * 100) if capacity_per_sheet > 0 else 0
-            print(f"\n  {'='*66}")
-            print(f"  📊 ИТОГО НА ЛИСТЕ #{current_sheet.sheet_number}:")
-            print(f"  {'='*66}")
-            print(f"    Размещено: {sheet_parts_placed} деталей")
-            print(f"    Ёмкость листа: {capacity_per_sheet} деталей")
-            print(f"    Заполнение: {usage_percent:.1f}%")
-            print(f"  {'='*66}")
-
+            
             if sheet_parts_placed == 0:
                 sheets.pop()
-                print(f"  ⚠️ Лист удалён (пустой)")
                 break
 
-        print(f"\n{'='*70}")
-        print(f"✅ ЗАВЕРШЕНО:")
-        print(f"{'='*70}")
+        print(f"\n✅ Завершено:")
         print(f"  Размещено: {parts_placed}/{quantity}")
-        print(f"  Использовано листов: {len(sheets)}")
-        print(f"{'='*70}\n")
+        print(f"  Листов: {len(sheets)}")
+        
+        for i, sheet in enumerate(sheets, 1):
+            usage = (len(sheet.parts) / capacity_per_sheet * 100) if capacity_per_sheet > 0 else 0
+            print(f"  Лист #{i}: {len(sheet.parts)} деталей ({usage:.1f}%)")
 
-        return self._calculate_result_statistics(sheets, quantity, parts_placed, "Parquet Tessellation v8.2 DEBUG")
+        return self._calculate_result_statistics(sheets, quantity, parts_placed, "Parquet Tessellation v9.0 ULTIMATE (Alternating Rows)")
 
     def _optimize_general(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
         """Общий алгоритм Bottom-Left для произвольных фигур."""
@@ -885,8 +817,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         print(f"Import error: {e}")
         return
 
-    st.markdown("## 🔺 Паркетная тесселяция v8.2 DEBUG")
-    st.markdown("**Полная диагностика заполнения листа**")
+    st.markdown("## 🔺 Паркетная тесселяция v9.0 ULTIMATE")
+    st.markdown("**Чередующиеся ряды для максимальной плотности**")
     st.markdown("---")
 
     if not SHAPELY_AVAILABLE:
@@ -970,9 +902,9 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
     st.markdown("---")
 
-    if st.button("🚀 Запустить DEBUG v8.2", type="primary", use_container_width=True):
+    if st.button("🚀 Запустить v9.0 ULTIMATE", type="primary", use_container_width=True):
         
-        with st.expander("📋 ПОЛНЫЕ ЛОГИ ДИАГНОСТИКИ", expanded=True):
+        with st.expander("📋 Логи оптимизации", expanded=False):
             import io, sys
             old_stdout = sys.stdout
             sys.stdout = buffer = io.StringIO()
@@ -989,7 +921,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                 st.session_state['nesting_geometry'] = selected_geom
                 st.session_state['nesting_info'] = selected_info
                 
-                st.success("✅ Диагностика завершена!")
+                st.success("✅ Оптимизация завершена!")
+                st.balloons()
                 
             except Exception as e:
                 sys.stdout = old_stdout
@@ -1020,6 +953,9 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
             st.metric("♻️ Отходы", f"{result.total_waste/1e6:.2f} м²")
 
         st.info(f"**Алгоритм:** {result.algorithm_used}")
+
+        if result.parts_not_placed > 0:
+            st.warning(f"⚠️ **{result.parts_not_placed}** деталей не поместились!")
 
         if result.sheets and result.parts_placed > 0:
             st.markdown("---")
@@ -1142,7 +1078,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
 if __name__ == "__main__":
     print("="*70)
-    print("🔺 Модуль оптимизации v8.2 DEBUG")
+    print("🔺 Модуль оптимизации v9.0 ULTIMATE")
     print("="*70)
     print(f"Shapely: {SHAPELY_AVAILABLE}")
     if SHAPELY_AVAILABLE:
