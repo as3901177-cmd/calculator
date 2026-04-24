@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 8.0 ULTIMATE - Идеальная паркетная тесселяция без пересечений.
+Версия 8.1 FINAL - Идеальная паркетная тесселяция с максимальным заполнением.
 """
 
 import math
@@ -505,10 +505,9 @@ class AdvancedNestingOptimizer:
 
     def _optimize_triangle_parquet(self, part_geometry: ShapelyPolygon, quantity: int, original_area: Optional[float] = None) -> NestingResult:
         """
-        🔺 ИДЕАЛЬНАЯ ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ V8.0
+        🔺 ИДЕАЛЬНАЯ ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ V8.1
         
-        Укладка: каждый треугольник занимает W/2 по горизонтали
-        Ряды смещены на W/2 для шахматного порядка
+        Заполняет каждый лист максимально, затем переходит к следующему.
         """
         
         pattern = create_parquet_pattern(part_geometry)
@@ -530,15 +529,18 @@ class AdvancedNestingOptimizer:
         usable_w = self.sheet_width - 2 * sp
         usable_h = self.sheet_height - 2 * sp
 
-        # ✅ ПРАВИЛЬНЫЙ РАСЧЁТ: каждый треугольник = W/2
+        # Каждый треугольник занимает W/2 по ширине
         triangle_width = base_width / 2
         triangles_per_row = max(1, int(usable_w / triangle_width))
         rows = max(1, int(usable_h / (height + sp)))
 
+        # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: вычисляем ёмкость ОДНОГО листа
+        capacity_per_sheet = triangles_per_row * rows
+
         print(f"\n📐 Сетка:")
         print(f"  Треугольников в ряду: {triangles_per_row}")
         print(f"  Рядов: {rows}")
-        print(f"  Ёмкость: {triangles_per_row * rows}")
+        print(f"  Ёмкость листа: {capacity_per_sheet}")
 
         sheets: List[Sheet] = []
         parts_placed = 0
@@ -547,13 +549,20 @@ class AdvancedNestingOptimizer:
         def new_sheet() -> Sheet:
             return Sheet(sheet_number=len(sheets) + 1, width=self.sheet_width, height=self.sheet_height)
 
-        def place_triangles_on_sheet(sheet: Sheet, start_id: int, max_parts: int) -> int:
-            """Размещает треугольники на листе. Возвращает количество размещённых."""
-            placed = 0
-            current_id = start_id
+        # ✅ ГЛАВНОЕ ИСПРАВЛЕНИЕ: создаём листы по необходимости
+        while part_id <= quantity:
+            # Создаём новый лист
+            current_sheet = new_sheet()
+            sheets.append(current_sheet)
+            
+            if len(sheets) > 1:
+                print(f"\n📄 Лист #{current_sheet.sheet_number}")
 
+            # Заполняем текущий лист ПОЛНОСТЬЮ
+            sheet_parts_placed = 0
+            
             for row_idx in range(rows):
-                if current_id > max_parts:
+                if part_id > quantity:
                     break
 
                 # Y-позиция базы ряда
@@ -566,7 +575,7 @@ class AdvancedNestingOptimizer:
                 row_offset = (row_idx % 2) * triangle_width
 
                 for col_idx in range(triangles_per_row):
-                    if current_id > max_parts:
+                    if part_id > quantity:
                         break
 
                     # X-позиция треугольника
@@ -598,50 +607,36 @@ class AdvancedNestingOptimizer:
                         continue
 
                     # Добавляем деталь
-                    sheet.parts.append(PlacedPart(
-                        part_id=current_id,
-                        part_name=f"Деталь #{current_id} {symbol}",
+                    current_sheet.parts.append(PlacedPart(
+                        part_id=part_id,
+                        part_name=f"Деталь #{part_id} {symbol}",
                         x=x_pos,
                         y=y_base,
                         rotation=rotation,
                         geometry=placed_geom,
                         bounding_box=bounds
                     ))
-                    sheet.used_area += part_area
-                    placed += 1
-                    print(f"  ✓ {symbol} #{current_id} в ({x_pos:.1f}, {y_base:.1f})")
-                    current_id += 1
+                    current_sheet.used_area += part_area
+                    parts_placed += 1
+                    sheet_parts_placed += 1
+                    part_id += 1
 
-            return placed
-
-        # Размещаем на листах
-        current_sheet = new_sheet()
-        sheets.append(current_sheet)
-
-        placed_count = place_triangles_on_sheet(current_sheet, part_id, quantity)
-        parts_placed += placed_count
-        part_id += placed_count
-
-        # Дополнительные листы
-        while part_id <= quantity:
-            current_sheet = new_sheet()
-            sheets.append(current_sheet)
-            print(f"\n📄 Лист #{current_sheet.sheet_number}")
-
-            placed_count = place_triangles_on_sheet(current_sheet, part_id, quantity)
-            
-            if placed_count == 0:
+            # Если на лист ничего не поместилось, удаляем его
+            if sheet_parts_placed == 0:
                 sheets.pop()
+                print(f"  ⚠️ Лист #{current_sheet.sheet_number} удалён (не удалось разместить)")
                 break
-
-            parts_placed += placed_count
-            part_id += placed_count
 
         print(f"\n✅ Завершено:")
         print(f"  Размещено: {parts_placed}/{quantity}")
         print(f"  Листов: {len(sheets)}")
+        
+        # Показываем заполнение каждого листа
+        for i, sheet in enumerate(sheets, 1):
+            usage_percent = (len(sheet.parts) / capacity_per_sheet * 100) if capacity_per_sheet > 0 else 0
+            print(f"  Лист #{i}: {len(sheet.parts)} деталей ({usage_percent:.1f}% от ёмкости)")
 
-        return self._calculate_result_statistics(sheets, quantity, parts_placed, "Parquet Tessellation v8.0 ULTIMATE")
+        return self._calculate_result_statistics(sheets, quantity, parts_placed, "Parquet Tessellation v8.1 ULTIMATE")
 
     def _optimize_general(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
         """Общий алгоритм Bottom-Left для произвольных фигур."""
@@ -818,8 +813,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         print(f"Import error: {e}")
         return
 
-    st.markdown("## 🔺 Паркетная тесселяция v8.0 ULTIMATE")
-    st.markdown("**Идеальная укладка треугольников**")
+    st.markdown("## 🔺 Паркетная тесселяция v8.1 ULTIMATE")
+    st.markdown("**Максимальное заполнение каждого листа**")
     st.markdown("---")
 
     if not SHAPELY_AVAILABLE:
@@ -903,7 +898,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
     st.markdown("---")
 
-    if st.button("🚀 Запустить v8.0 ULTIMATE", type="primary", use_container_width=True):
+    if st.button("🚀 Запустить v8.1 ULTIMATE", type="primary", use_container_width=True):
         
         with st.expander("📋 Логи оптимизации", expanded=False):
             import io, sys
@@ -1079,7 +1074,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
 if __name__ == "__main__":
     print("="*70)
-    print("🔺 Модуль оптимизации v8.0 ULTIMATE")
+    print("🔺 Модуль оптимизации v8.1 ULTIMATE")
     print("="*70)
     print(f"Shapely: {SHAPELY_AVAILABLE}")
     if SHAPELY_AVAILABLE:
