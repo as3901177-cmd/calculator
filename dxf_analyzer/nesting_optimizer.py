@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 5.0 FINAL - Идеальная паркетная тесселяция треугольников.
+Версия 5.1 FINAL - Идеальная паркетная тесселяция треугольников.
 """
 
 import math
@@ -414,7 +414,7 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         dx = base_end[0] - base_start[0]
         dy = base_end[1] - base_start[1]
         angle_rad = math.atan2(dy, dx)
-        angle_deg = -math.degrees(angle_rad)  # Отрицательный для поворота базы на ось X
+        angle_deg = -math.degrees(angle_rad)
         
         # Поворачиваем все точки так, чтобы база стала горизонтальной
         def rotate_point(px, py, angle_degrees):
@@ -423,7 +423,6 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
             sin_a = math.sin(rad)
             return (px * cos_a - py * sin_a, px * sin_a + py * cos_a)
         
-        # Поворачиваем относительно начала координат
         rotated_coords = [rotate_point(p[0], p[1], angle_deg) for p in coords]
         
         # Находим новые позиции после поворота
@@ -452,9 +451,9 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         
         # Создаём базовый треугольник ▲ (вершина вверх)
         tri_up = ShapelyPolygon([
-            (0, 0),                    # Левый нижний угол
-            (base_len, 0),             # Правый нижний угол
-            norm_apex                   # Вершина сверху
+            (0, 0),
+            (base_len, 0),
+            norm_apex
         ])
         
         # Вычисляем высоту
@@ -462,17 +461,12 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         height = (2 * area) / base_len if base_len > MIN_COORDINATE_DIFF else 0
         
         # Создаём перевёрнутый треугольник ▼
-        # Он должен стыковаться с ▲ идеально
-        # Стратегия: отражаем треугольник ▲ по его правой стороне
-        
         apex_x, apex_y = norm_apex[0], norm_apex[1]
         
-        # Перевёрнутый треугольник начинается там, где заканчивается ▲
-        # и идёт вправо на такую же длину базы
         tri_down = ShapelyPolygon([
-            (base_len, 0),                           # Левая вершина (совпадает с правой ▲)
-            (2 * base_len - apex_x, apex_y),         # Верхняя вершина (отражённая)
-            (2 * base_len, 0)                        # Правая вершина
+            (base_len, 0),
+            (2 * base_len - apex_x, apex_y),
+            (2 * base_len, 0)
         ])
         
         # Проверяем валидность
@@ -594,12 +588,15 @@ class AdvancedNestingOptimizer:
         usable_w = self.sheet_width - 2 * sp
         usable_h = self.sheet_height - 2 * sp
 
-        # Вычисляем количество треугольников
-        # В паркете пара ▲▼ занимает ровно pattern_width
-        triangles_per_row = max(1, int(usable_w / pattern_width) * 2)  # *2 потому что пара
+        # ✅ ИСПРАВЛЕНИЕ: вычисляем количество пар (▲▼) в ряду
+        # Одна пара занимает pattern_width
+        pairs_per_row = max(1, int(usable_w / pattern_width))
+        triangles_per_row = pairs_per_row * 2
+        
         rows = max(1, int(usable_h / (pattern_height + sp)))
 
         print(f"\n📐 Сетка укладки:")
+        print(f"  Пар ▲▼ в ряду: {pairs_per_row}")
         print(f"  Треугольников в ряду: {triangles_per_row}")
         print(f"  Рядов: {rows}")
         print(f"  Ёмкость листа: {triangles_per_row * rows} треугольников")
@@ -625,53 +622,64 @@ class AdvancedNestingOptimizer:
             if y_pos + pattern_height > self.sheet_height - sp:
                 break
 
-            # Укладываем треугольники в ряду
-            tri_count = 0
-            x_pos = sp
-
-            while tri_count < triangles_per_row and part_id <= quantity:
-                # Проверяем границы
-                if x_pos + pattern_width > self.sheet_width - sp:
+            # ✅ ИСПРАВЛЕНИЕ: укладываем треугольники парами
+            for pair_idx in range(pairs_per_row):
+                if part_id > quantity:
                     break
-
-                # Чередуем ▲ и ▼
-                # Чётные позиции (0, 2, 4...) - ▲
-                # Нечётные позиции (1, 3, 5...) - ▼
-                is_up = (tri_count % 2 == 0)
-
-                if is_up:
-                    # Треугольник ▲ вершиной вверх
-                    placed = translate(tri_up, xoff=x_pos, yoff=y_pos)
-                    rotation = 0
-                else:
-                    # Треугольник ▼ вершиной вниз
-                    # Смещаем на половину ширины паттерна
-                    placed = translate(tri_down, xoff=x_pos - pattern_width, yoff=y_pos)
-                    rotation = 180
-
-                # Проверяем границы размещённого треугольника
-                bounds = placed.bounds
-                if (bounds[0] >= sp - 1e-6 and bounds[1] >= sp - 1e-6 and
-                    bounds[2] <= self.sheet_width - sp + 1e-6 and
-                    bounds[3] <= self.sheet_height - sp + 1e-6):
                     
-                    current_sheet.parts.append(PlacedPart(
-                        part_id=part_id,
-                        part_name=f"Деталь #{part_id}",
-                        x=x_pos,
-                        y=y_pos,
-                        rotation=rotation,
-                        geometry=placed,
-                        bounding_box=placed.bounds
-                    ))
-                    current_sheet.used_area += part_area
-                    parts_placed += 1
-                    part_id += 1
-
-                # Смещаем X-позицию
-                # Каждый треугольник смещается на половину ширины паттерна
-                x_pos += pattern_width / 2
-                tri_count += 1
+                # X-координата начала пары
+                x_base = sp + pair_idx * pattern_width
+                
+                # Проверяем границы
+                if x_base + pattern_width > self.sheet_width - sp:
+                    break
+                
+                # ▲ Треугольник вершиной вверх
+                if part_id <= quantity:
+                    placed_up = translate(tri_up, xoff=x_base, yoff=y_pos)
+                    bounds_up = placed_up.bounds
+                    
+                    if (bounds_up[0] >= sp - 1e-6 and bounds_up[1] >= sp - 1e-6 and
+                        bounds_up[2] <= self.sheet_width - sp + 1e-6 and
+                        bounds_up[3] <= self.sheet_height - sp + 1e-6):
+                        
+                        current_sheet.parts.append(PlacedPart(
+                            part_id=part_id,
+                            part_name=f"Деталь #{part_id}",
+                            x=x_base,
+                            y=y_pos,
+                            rotation=0,
+                            geometry=placed_up,
+                            bounding_box=bounds_up
+                        ))
+                        current_sheet.used_area += part_area
+                        parts_placed += 1
+                        part_id += 1
+                
+                # ▼ Перевёрнутый треугольник
+                if part_id <= quantity:
+                    # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: 
+                    # tri_down уже создан смещённым на pattern_width вправо
+                    # Поэтому позиционируем его относительно начала пары
+                    placed_down = translate(tri_down, xoff=x_base, yoff=y_pos)
+                    bounds_down = placed_down.bounds
+                    
+                    if (bounds_down[0] >= sp - 1e-6 and bounds_down[1] >= sp - 1e-6 and
+                        bounds_down[2] <= self.sheet_width - sp + 1e-6 and
+                        bounds_down[3] <= self.sheet_height - sp + 1e-6):
+                        
+                        current_sheet.parts.append(PlacedPart(
+                            part_id=part_id,
+                            part_name=f"Деталь #{part_id}",
+                            x=x_base,
+                            y=y_pos,
+                            rotation=180,
+                            geometry=placed_down,
+                            bounding_box=bounds_down
+                        ))
+                        current_sheet.used_area += part_area
+                        parts_placed += 1
+                        part_id += 1
 
         # Создаём дополнительные листы если нужно
         while part_id <= quantity:
@@ -687,43 +695,60 @@ class AdvancedNestingOptimizer:
                 if y_pos + pattern_height > self.sheet_height - sp:
                     break
 
-                tri_count = 0
-                x_pos = sp
-
-                while tri_count < triangles_per_row and part_id <= quantity:
-                    if x_pos + pattern_width > self.sheet_width - sp:
+                for pair_idx in range(pairs_per_row):
+                    if part_id > quantity:
                         break
-
-                    is_up = (tri_count % 2 == 0)
-
-                    if is_up:
-                        placed = translate(tri_up, xoff=x_pos, yoff=y_pos)
-                        rotation = 0
-                    else:
-                        placed = translate(tri_down, xoff=x_pos - pattern_width, yoff=y_pos)
-                        rotation = 180
-
-                    bounds = placed.bounds
-                    if (bounds[0] >= sp - 1e-6 and bounds[1] >= sp - 1e-6 and
-                        bounds[2] <= self.sheet_width - sp + 1e-6 and
-                        bounds[3] <= self.sheet_height - sp + 1e-6):
                         
-                        current_sheet.parts.append(PlacedPart(
-                            part_id=part_id,
-                            part_name=f"Деталь #{part_id}",
-                            x=x_pos,
-                            y=y_pos,
-                            rotation=rotation,
-                            geometry=placed,
-                            bounding_box=placed.bounds
-                        ))
-                        current_sheet.used_area += part_area
-                        parts_placed += 1
-                        part_id += 1
-                        placed_on_sheet = True
-
-                    x_pos += pattern_width / 2
-                    tri_count += 1
+                    x_base = sp + pair_idx * pattern_width
+                    
+                    if x_base + pattern_width > self.sheet_width - sp:
+                        break
+                    
+                    # ▲ Вверх
+                    if part_id <= quantity:
+                        placed_up = translate(tri_up, xoff=x_base, yoff=y_pos)
+                        bounds_up = placed_up.bounds
+                        
+                        if (bounds_up[0] >= sp - 1e-6 and bounds_up[1] >= sp - 1e-6 and
+                            bounds_up[2] <= self.sheet_width - sp + 1e-6 and
+                            bounds_up[3] <= self.sheet_height - sp + 1e-6):
+                            
+                            current_sheet.parts.append(PlacedPart(
+                                part_id=part_id,
+                                part_name=f"Деталь #{part_id}",
+                                x=x_base,
+                                y=y_pos,
+                                rotation=0,
+                                geometry=placed_up,
+                                bounding_box=bounds_up
+                            ))
+                            current_sheet.used_area += part_area
+                            parts_placed += 1
+                            part_id += 1
+                            placed_on_sheet = True
+                    
+                    # ▼ Вниз
+                    if part_id <= quantity:
+                        placed_down = translate(tri_down, xoff=x_base, yoff=y_pos)
+                        bounds_down = placed_down.bounds
+                        
+                        if (bounds_down[0] >= sp - 1e-6 and bounds_down[1] >= sp - 1e-6 and
+                            bounds_down[2] <= self.sheet_width - sp + 1e-6 and
+                            bounds_down[3] <= self.sheet_height - sp + 1e-6):
+                            
+                            current_sheet.parts.append(PlacedPart(
+                                part_id=part_id,
+                                part_name=f"Деталь #{part_id}",
+                                x=x_base,
+                                y=y_pos,
+                                rotation=180,
+                                geometry=placed_down,
+                                bounding_box=bounds_down
+                            ))
+                            current_sheet.used_area += part_area
+                            parts_placed += 1
+                            part_id += 1
+                            placed_on_sheet = True
 
             if not placed_on_sheet:
                 sheets.pop()
@@ -1157,7 +1182,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
 if __name__ == "__main__":
     print("="*70)
-    print("🔺 Модуль оптимизации раскроя v5.0 FINAL")
+    print("🔺 Модуль оптимизации раскроя v5.1 FINAL")
     print("   ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ ТРЕУГОЛЬНИКОВ")
     print("="*70)
     print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
