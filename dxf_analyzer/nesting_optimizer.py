@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 6.0 FINAL - Истинная паркетная тесселяция треугольников.
+Версия 7.0 FINAL - Паркетная тесселяция с проверкой пересечений.
 """
 
 import math
@@ -277,7 +277,6 @@ def simplify_to_triangle(geom: ShapelyPolygon, tolerance: float = 1.0) -> Option
     try:
         coords = list(geom.exterior.coords)[:-1]
         
-        # Стратегия 1: Convex Hull
         hull = geom.convex_hull
         hull_coords = list(hull.exterior.coords)[:-1]
         
@@ -286,7 +285,6 @@ def simplify_to_triangle(geom: ShapelyPolygon, tolerance: float = 1.0) -> Option
             if area_diff < 5.0:
                 return hull
         
-        # Стратегия 2: Упрощение с нарастающим tolerance
         for tol in [0.5, 1.0, 2.0, 5.0, 10.0]:
             simplified = geom.simplify(tolerance=tol, preserve_topology=True)
             simp_coords = list(simplified.exterior.coords)[:-1]
@@ -296,7 +294,6 @@ def simplify_to_triangle(geom: ShapelyPolygon, tolerance: float = 1.0) -> Option
                 if area_diff < 10.0:
                     return simplified
         
-        # Стратегия 3: Находим 3 самые удалённые точки
         centroid = geom.centroid
         cx, cy = centroid.x, centroid.y
         
@@ -369,22 +366,19 @@ def detect_and_simplify_triangle(geom: ShapelyPolygon) -> Tuple[ShapelyPolygon, 
 def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygon, ShapelyPolygon, float, float]]:
     """
     Создаёт паттерн для паркетной тесселяции треугольников.
-    
-    НОВЫЙ ПОДХОД: Используем rotate() из Shapely для поворота треугольника.
+    Использует поворот Shapely для создания перевёрнутого треугольника.
     """
     try:
         coords = list(geom.exterior.coords)[:-1]
         if len(coords) != 3:
             return None
 
-        # Вычисляем длины всех сторон
         p0, p1, p2 = coords[0], coords[1], coords[2]
         
         side_01 = math.hypot(p1[0] - p0[0], p1[1] - p0[1])
         side_12 = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
         side_20 = math.hypot(p0[0] - p2[0], p0[1] - p2[1])
         
-        # Находим самую длинную сторону (база)
         sides = [
             (side_01, 0, 1, 2),
             (side_12, 1, 2, 0),
@@ -394,34 +388,22 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         
         base_len, idx_base_start, idx_base_end, idx_apex = sides[0]
         
-        # Получаем координаты вершин
         base_start = coords[idx_base_start]
         base_end = coords[idx_base_end]
         apex = coords[idx_apex]
         
-        # Создаём нормализованный треугольник ▲
-        # База горизонтально от (0,0) до (base_len, 0)
-        # Вершина сверху
-        
-        # Вычисляем высоту от базы до вершины
-        # Используем формулу площади треугольника
         area = abs(geom.area)
         height = (2 * area) / base_len if base_len > MIN_COORDINATE_DIFF else 0
         
-        # Находим X-координату вершины (проекция на базу)
-        # Используем векторное произведение для определения положения
         base_vec = (base_end[0] - base_start[0], base_end[1] - base_start[1])
         apex_vec = (apex[0] - base_start[0], apex[1] - base_start[1])
         
-        # Проекция вершины на базу
         base_len_sq = base_vec[0]**2 + base_vec[1]**2
         if base_len_sq > 0:
             projection = (apex_vec[0] * base_vec[0] + apex_vec[1] * base_vec[1]) / base_len_sq
             apex_x = projection * base_len
         else:
             apex_x = base_len / 2
-        
-        # ✅ СОЗДАЁМ ДВА РАЗНЫХ ТРЕУГОЛЬНИКА
         
         # ▲ Треугольник вершиной ВВЕРХ
         tri_up = ShapelyPolygon([
@@ -430,22 +412,18 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
             (apex_x, height)
         ])
         
-        # ▼ Треугольник вершиной ВНИЗ (поворот на 180° относительно центра базы)
-        # Центр базы находится в точке (base_len/2, 0)
+        # ▼ Треугольник вершиной ВНИЗ (поворот на 180°)
         center_x = base_len / 2
         center_y = 0
         
-        # Поворачиваем tri_up на 180° относительно центра базы
         from shapely.affinity import rotate as shapely_rotate
         tri_down = shapely_rotate(tri_up, 180, origin=(center_x, center_y))
         
-        # Проверяем валидность
         if not tri_up.is_valid:
             tri_up = tri_up.buffer(0)
         if not tri_down.is_valid:
             tri_down = tri_down.buffer(0)
         
-        # DEBUG: выводим координаты
         coords_up = list(tri_up.exterior.coords)[:-1]
         coords_down = list(tri_down.exterior.coords)[:-1]
         
@@ -456,7 +434,6 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         print(f"  tri_up: {[(round(x,2), round(y,2)) for x,y in coords_up]}")
         print(f"  tri_down: {[(round(x,2), round(y,2)) for x,y in coords_down]}")
         
-        # Проверяем, что треугольники действительно разные
         diff_y = abs(coords_up[2][1] - coords_down[2][1])
         print(f"  Разница в Y вершин: {diff_y:.2f} (должна быть ~{2*height:.2f})")
         
@@ -467,6 +444,40 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         import traceback
         traceback.print_exc()
         return None
+
+
+# ---------------------------------------------------------------------------
+# Проверка пересечений
+# ---------------------------------------------------------------------------
+
+def check_overlap(geom1: ShapelyPolygon, geom2: ShapelyPolygon, min_distance: float = 0.1) -> bool:
+    """
+    Проверяет, пересекаются ли два полигона (с учётом минимального расстояния).
+    
+    Returns:
+        True если есть пересечение (ПЛОХО)
+        False если пересечения нет (ХОРОШО)
+    """
+    try:
+        # Проверяем расстояние между полигонами
+        distance = geom1.distance(geom2)
+        
+        if distance < min_distance:
+            return True  # Слишком близко = пересечение
+        
+        # Проверяем пересечение внутренностей
+        if geom1.intersects(geom2):
+            intersection = geom1.intersection(geom2)
+            # Если пересечение имеет площадь > 0, значит внутренности пересекаются
+            if hasattr(intersection, 'area') and intersection.area > MIN_POLYGON_AREA:
+                return True
+        
+        return False
+        
+    except Exception as e:
+        logger.warning(f"Error checking overlap: {e}")
+        return True  # В случае ошибки считаем что есть пересечение (безопаснее)
+
 
 # ---------------------------------------------------------------------------
 # Основной класс оптимизатора
@@ -496,13 +507,11 @@ class AdvancedNestingOptimizer:
             return self._create_empty_result(0, "Invalid quantity")
 
         try:
-            # Центрируем геометрию
             bounds = part_geometry.bounds
             cx = (bounds[0] + bounds[2]) / 2
             cy = (bounds[1] + bounds[3]) / 2
             normalized_input = translate(part_geometry, xoff=-cx, yoff=-cy)
 
-            # Пытаемся упростить до треугольника
             simplified_geom, is_triangle = detect_and_simplify_triangle(normalized_input)
             
             if is_triangle:
@@ -544,12 +553,11 @@ class AdvancedNestingOptimizer:
 
     def _optimize_triangle_parquet(self, part_geometry: ShapelyPolygon, quantity: int, original_area: Optional[float] = None) -> NestingResult:
         """
-        🔺 ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ ТРЕУГОЛЬНИКОВ
+        🔺 ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ ТРЕУГОЛЬНИКОВ V7.0
         
-        Укладка: ▲▼▲▼ в каждом ряду
+        Правильная укладка: ▲▼▲▼ (чередование в каждом ряду)
         """
         
-        # Создаём паркетный паттерн
         pattern = create_parquet_pattern(part_geometry)
         if pattern is None:
             print("❌ Не удалось создать паркетный паттерн")
@@ -570,15 +578,15 @@ class AdvancedNestingOptimizer:
         usable_w = self.sheet_width - 2 * sp
         usable_h = self.sheet_height - 2 * sp
 
-        # Количество треугольников в ряду (▲▼ занимает pattern_width)
-        pairs_per_row = max(1, int(usable_w / pattern_width))
-        triangles_per_row = pairs_per_row * 2
+        # ✅ ПРАВИЛЬНАЯ ПАРКЕТНАЯ УКЛАДКА
+        # Пара ▲▼ занимает ровно pattern_width по ширине
+        # По высоте: ▲ занимает pattern_height вверх, ▼ занимает pattern_height вниз
+        # Итого высота пары = 2 * pattern_height
         
-        # Высота ряда = высота ▲ (▼ уходит вниз, не добавляет высоту)
-        rows = max(1, int(usable_h / (pattern_height + sp)))
+        triangles_per_row = max(1, int(usable_w / (pattern_width / 2)))  # Каждые pattern_width/2 начинается новый треугольник
+        rows = max(1, int(usable_h / (2 * pattern_height + sp)))  # Высота пары = 2*height
 
         print(f"\n📐 Сетка укладки:")
-        print(f"  Пар ▲▼ в ряду: {pairs_per_row}")
         print(f"  Треугольников в ряду: {triangles_per_row}")
         print(f"  Рядов: {rows}")
         print(f"  Ёмкость листа: {triangles_per_row * rows} треугольников")
@@ -598,69 +606,73 @@ class AdvancedNestingOptimizer:
             if part_id > quantity:
                 break
 
-            # Y-координата базы треугольников в ряду
-            y_pos = sp + row_idx * (pattern_height + sp)
+            # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Y-позиция центра пары (где сходятся ▲ и ▼)
+            # Первый ряд: база ▲ на sp, вершина ▲ на sp + height, база ▼ на sp + height
+            y_base = sp + row_idx * (2 * pattern_height + sp) + pattern_height
 
-            if y_pos + pattern_height > self.sheet_height - sp:
+            if y_base + pattern_height > self.sheet_height - sp:
                 break
 
-            # Укладываем пары ▲▼
-            for pair_idx in range(pairs_per_row):
-                if part_id > quantity:
-                    break
-                    
-                # X-координата пары
-                x_base = sp + pair_idx * pattern_width
+            # Укладываем треугольники
+            tri_count = 0
+            while tri_count < triangles_per_row and part_id <= quantity:
+                # X-позиция текущего треугольника
+                x_pos = sp + tri_count * (pattern_width / 2)
                 
-                if x_base + pattern_width > self.sheet_width - sp:
+                if x_pos + pattern_width > self.sheet_width - sp:
                     break
                 
-                # ▲ Треугольник вершиной вверх
-                if part_id <= quantity:
-                    placed_up = translate(tri_up, xoff=x_base, yoff=y_pos)
-                    bounds_up = placed_up.bounds
-                    
-                    if (bounds_up[0] >= sp - 1e-6 and bounds_up[1] >= sp - 1e-6 and
-                        bounds_up[2] <= self.sheet_width - sp + 1e-6 and
-                        bounds_up[3] <= self.sheet_height - sp + 1e-6):
-                        
-                        current_sheet.parts.append(PlacedPart(
-                            part_id=part_id,
-                            part_name=f"Деталь #{part_id} ▲",
-                            x=x_base,
-                            y=y_pos,
-                            rotation=0,
-                            geometry=placed_up,
-                            bounding_box=bounds_up
-                        ))
-                        current_sheet.used_area += part_area
-                        parts_placed += 1
-                        print(f"  ✓ ▲ #{part_id} в ({x_base:.1f}, {y_pos:.1f})")
-                        part_id += 1
+                # Чередуем ▲ и ▼
+                is_up = (tri_count % 2 == 0)
                 
-                # ▼ Перевёрнутый треугольник (в той же позиции, но повёрнут)
-                if part_id <= quantity:
-                    # ▼ начинается от правого края ▲ и идёт вниз
-                    placed_down = translate(tri_down, xoff=x_base, yoff=y_pos)
-                    bounds_down = placed_down.bounds
-                    
-                    if (bounds_down[0] >= sp - 1e-6 and bounds_down[1] >= sp - 1e-6 and
-                        bounds_down[2] <= self.sheet_width - sp + 1e-6 and
-                        bounds_down[3] <= self.sheet_height - sp + 1e-6):
-                        
-                        current_sheet.parts.append(PlacedPart(
-                            part_id=part_id,
-                            part_name=f"Деталь #{part_id} ▼",
-                            x=x_base,
-                            y=y_pos,
-                            rotation=180,
-                            geometry=placed_down,
-                            bounding_box=bounds_down
-                        ))
-                        current_sheet.used_area += part_area
-                        parts_placed += 1
-                        print(f"  ✓ ▼ #{part_id} в ({x_base:.1f}, {y_pos:.1f})")
-                        part_id += 1
+                if is_up:
+                    # ▲ Треугольник: база внизу, вершина вверху
+                    placed = translate(tri_up, xoff=x_pos, yoff=y_base - pattern_height)
+                    symbol = "▲"
+                    rotation = 0
+                else:
+                    # ▼ Треугольник: вершина внизу, база вверху
+                    # tri_down уже перевёрнут, просто смещаем
+                    placed = translate(tri_down, xoff=x_pos - pattern_width/2, yoff=y_base)
+                    symbol = "▼"
+                    rotation = 180
+                
+                bounds = placed.bounds
+                
+                # Проверяем границы листа
+                if not (bounds[0] >= sp - 1e-6 and bounds[1] >= sp - 1e-6 and
+                        bounds[2] <= self.sheet_width - sp + 1e-6 and
+                        bounds[3] <= self.sheet_height - sp + 1e-6):
+                    tri_count += 1
+                    continue
+                
+                # ✅ ПРОВЕРКА ПЕРЕСЕЧЕНИЙ
+                has_overlap = False
+                for existing_part in current_sheet.parts:
+                    if check_overlap(placed, existing_part.geometry, min_distance=sp):
+                        has_overlap = True
+                        print(f"  ❌ {symbol} #{part_id} пересекается с #{existing_part.part_id}!")
+                        break
+                
+                if has_overlap:
+                    tri_count += 1
+                    continue
+                
+                # Размещаем треугольник
+                current_sheet.parts.append(PlacedPart(
+                    part_id=part_id,
+                    part_name=f"Деталь #{part_id} {symbol}",
+                    x=x_pos,
+                    y=y_base,
+                    rotation=rotation,
+                    geometry=placed,
+                    bounding_box=bounds
+                ))
+                current_sheet.used_area += part_area
+                parts_placed += 1
+                print(f"  ✓ {symbol} #{part_id} в ({x_pos:.1f}, {y_base:.1f})")
+                part_id += 1
+                tri_count += 1
 
         # Создаём дополнительные листы
         while part_id <= quantity:
@@ -674,66 +686,62 @@ class AdvancedNestingOptimizer:
                 if part_id > quantity:
                     break
 
-                y_pos = sp + row_idx * (pattern_height + sp)
-                if y_pos + pattern_height > self.sheet_height - sp:
+                y_base = sp + row_idx * (2 * pattern_height + sp) + pattern_height
+
+                if y_base + pattern_height > self.sheet_height - sp:
                     break
 
-                for pair_idx in range(pairs_per_row):
-                    if part_id > quantity:
-                        break
-                        
-                    x_base = sp + pair_idx * pattern_width
+                tri_count = 0
+                while tri_count < triangles_per_row and part_id <= quantity:
+                    x_pos = sp + tri_count * (pattern_width / 2)
                     
-                    if x_base + pattern_width > self.sheet_width - sp:
+                    if x_pos + pattern_width > self.sheet_width - sp:
                         break
                     
-                    # ▲
-                    if part_id <= quantity:
-                        placed_up = translate(tri_up, xoff=x_base, yoff=y_pos)
-                        bounds_up = placed_up.bounds
-                        
-                        if (bounds_up[0] >= sp - 1e-6 and bounds_up[1] >= sp - 1e-6 and
-                            bounds_up[2] <= self.sheet_width - sp + 1e-6 and
-                            bounds_up[3] <= self.sheet_height - sp + 1e-6):
-                            
-                            current_sheet.parts.append(PlacedPart(
-                                part_id=part_id,
-                                part_name=f"Деталь #{part_id} ▲",
-                                x=x_base,
-                                y=y_pos,
-                                rotation=0,
-                                geometry=placed_up,
-                                bounding_box=bounds_up
-                            ))
-                            current_sheet.used_area += part_area
-                            parts_placed += 1
-                            placed_on_sheet = True
-                            print(f"  ✓ ▲ #{part_id} в ({x_base:.1f}, {y_pos:.1f})")
-                            part_id += 1
+                    is_up = (tri_count % 2 == 0)
                     
-                    # ▼
-                    if part_id <= quantity:
-                        placed_down = translate(tri_down, xoff=x_base, yoff=y_pos)
-                        bounds_down = placed_down.bounds
-                        
-                        if (bounds_down[0] >= sp - 1e-6 and bounds_down[1] >= sp - 1e-6 and
-                            bounds_down[2] <= self.sheet_width - sp + 1e-6 and
-                            bounds_down[3] <= self.sheet_height - sp + 1e-6):
-                            
-                            current_sheet.parts.append(PlacedPart(
-                                part_id=part_id,
-                                part_name=f"Деталь #{part_id} ▼",
-                                x=x_base,
-                                y=y_pos,
-                                rotation=180,
-                                geometry=placed_down,
-                                bounding_box=bounds_down
-                            ))
-                            current_sheet.used_area += part_area
-                            parts_placed += 1
-                            placed_on_sheet = True
-                            print(f"  ✓ ▼ #{part_id} в ({x_base:.1f}, {y_pos:.1f})")
-                            part_id += 1
+                    if is_up:
+                        placed = translate(tri_up, xoff=x_pos, yoff=y_base - pattern_height)
+                        symbol = "▲"
+                        rotation = 0
+                    else:
+                        placed = translate(tri_down, xoff=x_pos - pattern_width/2, yoff=y_base)
+                        symbol = "▼"
+                        rotation = 180
+                    
+                    bounds = placed.bounds
+                    
+                    if not (bounds[0] >= sp - 1e-6 and bounds[1] >= sp - 1e-6 and
+                            bounds[2] <= self.sheet_width - sp + 1e-6 and
+                            bounds[3] <= self.sheet_height - sp + 1e-6):
+                        tri_count += 1
+                        continue
+                    
+                    has_overlap = False
+                    for existing_part in current_sheet.parts:
+                        if check_overlap(placed, existing_part.geometry, min_distance=sp):
+                            has_overlap = True
+                            break
+                    
+                    if has_overlap:
+                        tri_count += 1
+                        continue
+                    
+                    current_sheet.parts.append(PlacedPart(
+                        part_id=part_id,
+                        part_name=f"Деталь #{part_id} {symbol}",
+                        x=x_pos,
+                        y=y_base,
+                        rotation=rotation,
+                        geometry=placed,
+                        bounding_box=bounds
+                    ))
+                    current_sheet.used_area += part_area
+                    parts_placed += 1
+                    placed_on_sheet = True
+                    print(f"  ✓ {symbol} #{part_id} в ({x_pos:.1f}, {y_base:.1f})")
+                    part_id += 1
+                    tri_count += 1
 
             if not placed_on_sheet:
                 sheets.pop()
@@ -743,7 +751,7 @@ class AdvancedNestingOptimizer:
         print(f"  Размещено: {parts_placed}/{quantity}")
         print(f"  Использовано листов: {len(sheets)}")
 
-        return self._calculate_result_statistics(sheets, quantity, parts_placed, "Parquet Tessellation v6.0")
+        return self._calculate_result_statistics(sheets, quantity, parts_placed, "Parquet Tessellation v7.0")
 
     def _optimize_general(self, part_geometry: ShapelyPolygon, quantity: int) -> NestingResult:
         """Общий алгоритм Bottom-Left для произвольных фигур."""
@@ -920,8 +928,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
         print(f"Import error: {e}")
         return
 
-    st.markdown("## 🔺 Паркетная тесселяция треугольников v6.0")
-    st.markdown("**Истинная паркетная укладка без наложений**")
+    st.markdown("## 🔺 Паркетная тесселяция треугольников v7.0")
+    st.markdown("**Укладка без пересечений и наложений**")
     st.markdown("---")
 
     if not SHAPELY_AVAILABLE:
@@ -1005,9 +1013,9 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
     st.markdown("---")
 
-    if st.button("🚀 Запустить паркетную тесселяцию v6.0", type="primary", use_container_width=True):
+    if st.button("🚀 Запустить паркетную тесселяцию v7.0", type="primary", use_container_width=True):
         
-        with st.expander("📋 Подробные логи оптимизации", expanded=True):
+        with st.expander("📋 Подробные логи оптимизации", expanded=False):
             import io, sys
             old_stdout = sys.stdout
             sys.stdout = buffer = io.StringIO()
@@ -1186,8 +1194,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
 if __name__ == "__main__":
     print("="*70)
-    print("🔺 Модуль оптимизации раскроя v6.0 FINAL")
-    print("   ИСТИННАЯ ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ ТРЕУГОЛЬНИКОВ")
+    print("🔺 Модуль оптимизации раскроя v7.0 FINAL")
+    print("   ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ С ПРОВЕРКОЙ ПЕРЕСЕЧЕНИЙ")
     print("="*70)
     print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
     if SHAPELY_AVAILABLE:
