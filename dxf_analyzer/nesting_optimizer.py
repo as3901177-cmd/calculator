@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 5.2 FINAL - Идеальная паркетная тесселяция треугольников с полной визуализацией.
+Версия 5.3 FINAL - Идеальная паркетная тесселяция треугольников с правильной визуализацией.
 """
 
 import math
@@ -449,31 +449,35 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         if norm_base_start[0] > norm_base_end[0]:
             norm_base_start, norm_base_end = norm_base_end, norm_base_start
         
-        # Создаём базовый треугольник ▲ (вершина вверх)
+        # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Создаём ОБА треугольника с координатами от (0,0)
+        # Треугольник ▲ (вершина вверх)
         tri_up = ShapelyPolygon([
-            (0, 0),
-            (base_len, 0),
-            norm_apex
+            (0, 0),           # Левый нижний угол
+            (base_len, 0),    # Правый нижний угол
+            norm_apex         # Вершина
+        ])
+        
+        # Треугольник ▼ (вершина вниз) - ЗЕРКАЛЬНО ОТРАЖЁННЫЙ
+        # Вместо смещения, создаём его как зеркальное отражение ▲
+        tri_down = ShapelyPolygon([
+            (0, 0),                          # Левая вершина (была правой базой ▲)
+            (base_len, 0),                   # Правая вершина (будет правой)
+            (base_len - norm_apex[0], norm_apex[1])  # Отражённая вершина
         ])
         
         # Вычисляем высоту
         area = abs(geom.area)
         height = (2 * area) / base_len if base_len > MIN_COORDINATE_DIFF else 0
         
-        # Создаём перевёрнутый треугольник ▼
-        apex_x, apex_y = norm_apex[0], norm_apex[1]
-        
-        tri_down = ShapelyPolygon([
-            (base_len, 0),
-            (2 * base_len - apex_x, apex_y),
-            (2 * base_len, 0)
-        ])
-        
         # Проверяем валидность
         if not tri_up.is_valid:
             tri_up = tri_up.buffer(0)
         if not tri_down.is_valid:
             tri_down = tri_down.buffer(0)
+        
+        print(f"\n🔍 DEBUG паттерна:")
+        print(f"  tri_up coords: {list(tri_up.exterior.coords)}")
+        print(f"  tri_down coords: {list(tri_down.exterior.coords)}")
         
         return tri_up, tri_down, base_len, height
         
@@ -621,7 +625,7 @@ class AdvancedNestingOptimizer:
             if y_pos + pattern_height > self.sheet_height - sp:
                 break
 
-            # Укладываем треугольники парами
+            # ✅ ИСПРАВЛЕНИЕ: Укладываем треугольники парами со СМЕЩЕНИЕМ
             for pair_idx in range(pairs_per_row):
                 if part_id > quantity:
                     break
@@ -633,7 +637,7 @@ class AdvancedNestingOptimizer:
                 if x_base + pattern_width > self.sheet_width - sp:
                     break
                 
-                # ▲ Треугольник вершиной вверх
+                # ▲ Треугольник вершиной вверх (левый в паре)
                 if part_id <= quantity:
                     placed_up = translate(tri_up, xoff=x_base, yoff=y_pos)
                     bounds_up = placed_up.bounds
@@ -644,7 +648,7 @@ class AdvancedNestingOptimizer:
                         
                         current_sheet.parts.append(PlacedPart(
                             part_id=part_id,
-                            part_name=f"Деталь #{part_id}",
+                            part_name=f"Деталь #{part_id} ▲",
                             x=x_base,
                             y=y_pos,
                             rotation=0,
@@ -653,12 +657,16 @@ class AdvancedNestingOptimizer:
                         ))
                         current_sheet.used_area += part_area
                         parts_placed += 1
-                        print(f"  ✓ Размещён треугольник ▲ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
+                        
+                        coords_up = list(placed_up.exterior.coords)
+                        print(f"  ✓ ▲ #{part_id} в ({x_base:.1f}, {y_pos:.1f}) coords: {coords_up[0]}, {coords_up[1]}, {coords_up[2]}")
                         part_id += 1
                 
-                # ▼ Перевёрнутый треугольник
+                # ▼ Перевёрнутый треугольник (правый в паре)
+                # ✅ КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Смещаем вправо на ПОЛОВИНУ ширины паттерна
                 if part_id <= quantity:
-                    placed_down = translate(tri_down, xoff=x_base, yoff=y_pos)
+                    x_down = x_base + pattern_width / 2
+                    placed_down = translate(tri_down, xoff=x_down, yoff=y_pos)
                     bounds_down = placed_down.bounds
                     
                     if (bounds_down[0] >= sp - 1e-6 and bounds_down[1] >= sp - 1e-6 and
@@ -667,8 +675,8 @@ class AdvancedNestingOptimizer:
                         
                         current_sheet.parts.append(PlacedPart(
                             part_id=part_id,
-                            part_name=f"Деталь #{part_id}",
-                            x=x_base,
+                            part_name=f"Деталь #{part_id} ▼",
+                            x=x_down,
                             y=y_pos,
                             rotation=180,
                             geometry=placed_down,
@@ -676,7 +684,9 @@ class AdvancedNestingOptimizer:
                         ))
                         current_sheet.used_area += part_area
                         parts_placed += 1
-                        print(f"  ✓ Размещён треугольник ▼ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
+                        
+                        coords_down = list(placed_down.exterior.coords)
+                        print(f"  ✓ ▼ #{part_id} в ({x_down:.1f}, {y_pos:.1f}) coords: {coords_down[0]}, {coords_down[1]}, {coords_down[2]}")
                         part_id += 1
 
         # Создаём дополнительные листы если нужно
@@ -715,7 +725,7 @@ class AdvancedNestingOptimizer:
                             
                             current_sheet.parts.append(PlacedPart(
                                 part_id=part_id,
-                                part_name=f"Деталь #{part_id}",
+                                part_name=f"Деталь #{part_id} ▲",
                                 x=x_base,
                                 y=y_pos,
                                 rotation=0,
@@ -725,12 +735,15 @@ class AdvancedNestingOptimizer:
                             current_sheet.used_area += part_area
                             parts_placed += 1
                             placed_on_sheet = True
-                            print(f"  ✓ Размещён треугольник ▲ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
+                            
+                            coords_up = list(placed_up.exterior.coords)
+                            print(f"  ✓ ▲ #{part_id} в ({x_base:.1f}, {y_pos:.1f}) coords: {coords_up[0]}, {coords_up[1]}, {coords_up[2]}")
                             part_id += 1
                     
                     # ▼ Вниз
                     if part_id <= quantity:
-                        placed_down = translate(tri_down, xoff=x_base, yoff=y_pos)
+                        x_down = x_base + pattern_width / 2
+                        placed_down = translate(tri_down, xoff=x_down, yoff=y_pos)
                         bounds_down = placed_down.bounds
                         
                         if (bounds_down[0] >= sp - 1e-6 and bounds_down[1] >= sp - 1e-6 and
@@ -739,8 +752,8 @@ class AdvancedNestingOptimizer:
                             
                             current_sheet.parts.append(PlacedPart(
                                 part_id=part_id,
-                                part_name=f"Деталь #{part_id}",
-                                x=x_base,
+                                part_name=f"Деталь #{part_id} ▼",
+                                x=x_down,
                                 y=y_pos,
                                 rotation=180,
                                 geometry=placed_down,
@@ -749,7 +762,9 @@ class AdvancedNestingOptimizer:
                             current_sheet.used_area += part_area
                             parts_placed += 1
                             placed_on_sheet = True
-                            print(f"  ✓ Размещён треугольник ▼ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
+                            
+                            coords_down = list(placed_down.exterior.coords)
+                            print(f"  ✓ ▼ #{part_id} в ({x_down:.1f}, {y_pos:.1f}) coords: {coords_down[0]}, {coords_down[1]}, {coords_down[2]}")
                             part_id += 1
 
             if not placed_on_sheet:
@@ -1012,11 +1027,11 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        sheet_width = st.number_input("Ширина листа (мм)", value=3000.0, step=100.0, min_value=100.0)
+        sheet_width = st.number_input("Ширина листа (мм)", value=2000.0, step=100.0, min_value=100.0)
     with col2:
         sheet_height = st.number_input("Высота листа (мм)", value=1500.0, step=100.0, min_value=100.0)
     with col3:
-        spacing = st.number_input("Отступ между деталями (мм)", value=5.0, min_value=0.0, max_value=50.0, step=1.0)
+        spacing = st.number_input("Отступ между деталями (мм)", value=3.0, min_value=0.0, max_value=50.0, step=1.0)
 
     if selected_info['vertices'] > 3:
         st.info(f"💡 **Многовершинный полигон ({selected_info['vertices']} вершин)** будет автоматически упрощён до треугольника для паркетной укладки.")
@@ -1025,7 +1040,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
     if st.button("🚀 Запустить паркетную тесселяцию", type="primary", use_container_width=True):
         
-        with st.expander("📋 Подробные логи оптимизации", expanded=False):
+        with st.expander("📋 Подробные логи оптимизации", expanded=True):
             import io, sys
             old_stdout = sys.stdout
             sys.stdout = buffer = io.StringIO()
@@ -1105,7 +1120,6 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                     with col_s4:
                         st.metric("Эффективность", f"{sheet.efficiency:.1f}%")
                     
-                    # ✅ ИСПРАВЛЕНИЕ: Генерация уникальных цветов для КАЖДОЙ детали
                     fig, ax = plt.subplots(figsize=(18, 10))
                     fig.patch.set_facecolor('#FFFFFF')
                     ax.set_facecolor('#F5F5F5')
@@ -1119,10 +1133,8 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                     ax.add_patch(sheet_boundary)
                     
                     if sheet.parts:
-                        # ✅ Создаём палитру цветов по количеству деталей
                         num_parts = len(sheet.parts)
                         
-                        # Используем разные цветовые схемы для большей вариативности
                         if num_parts <= 20:
                             colors = plt.cm.tab20(np.linspace(0, 1, 20))
                         elif num_parts <= 40:
@@ -1135,12 +1147,10 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                             colors3 = plt.cm.tab20c(np.linspace(0, 1, 20))
                             colors = np.vstack([colors1, colors2, colors3])
                         
-                        # ✅ Рисуем каждую деталь с уникальным цветом
                         for i, part in enumerate(sheet.parts):
                             try:
                                 coords = list(part.geometry.exterior.coords)
                                 if len(coords) > 2:
-                                    # Используем индекс детали для выбора цвета
                                     color_idx = i % len(colors)
                                     
                                     part_polygon = MplPolygon(
@@ -1149,7 +1159,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                                         edgecolor='#003366',
                                         alpha=0.75,
                                         linewidth=1.5,
-                                        zorder=2  # ✅ Детали рисуем поверх фона
+                                        zorder=2
                                     )
                                     ax.add_patch(part_polygon)
                                     
@@ -1168,7 +1178,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                                                 alpha=0.9,
                                                 linewidth=1.5
                                             ),
-                                            zorder=3  # ✅ Номера рисуем поверх деталей
+                                            zorder=3
                                         )
                             except Exception as e:
                                 st.warning(f"⚠️ Ошибка отрисовки детали #{part.part_id}: {e}")
@@ -1209,7 +1219,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
 if __name__ == "__main__":
     print("="*70)
-    print("🔺 Модуль оптимизации раскроя v5.2 FINAL")
+    print("🔺 Модуль оптимизации раскроя v5.3 FINAL")
     print("   ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ ТРЕУГОЛЬНИКОВ")
     print("="*70)
     print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
@@ -1223,7 +1233,7 @@ if __name__ == "__main__":
         
         # Тест 1: Равнобедренный треугольник
         tri = ShapelyPolygon([(0, 0), (100, 0), (50, 80)])
-        opt = AdvancedNestingOptimizer(3000, 1500, spacing=5)
+        opt = AdvancedNestingOptimizer(2000, 1500, spacing=3)
         result = opt.optimize(tri, 30)
         
         print(f"\n📊 Результат теста:")
