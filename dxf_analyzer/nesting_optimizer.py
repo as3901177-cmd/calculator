@@ -1,6 +1,6 @@
 """
 Продвинутый алгоритм раскроя с поддержкой произвольных треугольников.
-Версия 5.1 FINAL - Идеальная паркетная тесселяция треугольников.
+Версия 5.2 FINAL - Идеальная паркетная тесселяция треугольников с полной визуализацией.
 """
 
 import math
@@ -588,8 +588,7 @@ class AdvancedNestingOptimizer:
         usable_w = self.sheet_width - 2 * sp
         usable_h = self.sheet_height - 2 * sp
 
-        # ✅ ИСПРАВЛЕНИЕ: вычисляем количество пар (▲▼) в ряду
-        # Одна пара занимает pattern_width
+        # Вычисляем количество пар (▲▼) в ряду
         pairs_per_row = max(1, int(usable_w / pattern_width))
         triangles_per_row = pairs_per_row * 2
         
@@ -622,7 +621,7 @@ class AdvancedNestingOptimizer:
             if y_pos + pattern_height > self.sheet_height - sp:
                 break
 
-            # ✅ ИСПРАВЛЕНИЕ: укладываем треугольники парами
+            # Укладываем треугольники парами
             for pair_idx in range(pairs_per_row):
                 if part_id > quantity:
                     break
@@ -654,13 +653,11 @@ class AdvancedNestingOptimizer:
                         ))
                         current_sheet.used_area += part_area
                         parts_placed += 1
+                        print(f"  ✓ Размещён треугольник ▲ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
                         part_id += 1
                 
                 # ▼ Перевёрнутый треугольник
                 if part_id <= quantity:
-                    # ✅ КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: 
-                    # tri_down уже создан смещённым на pattern_width вправо
-                    # Поэтому позиционируем его относительно начала пары
                     placed_down = translate(tri_down, xoff=x_base, yoff=y_pos)
                     bounds_down = placed_down.bounds
                     
@@ -679,6 +676,7 @@ class AdvancedNestingOptimizer:
                         ))
                         current_sheet.used_area += part_area
                         parts_placed += 1
+                        print(f"  ✓ Размещён треугольник ▼ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
                         part_id += 1
 
         # Создаём дополнительные листы если нужно
@@ -686,6 +684,8 @@ class AdvancedNestingOptimizer:
             current_sheet = new_sheet()
             sheets.append(current_sheet)
             placed_on_sheet = False
+            
+            print(f"\n📄 Создан лист #{current_sheet.sheet_number}")
 
             for row_idx in range(rows):
                 if part_id > quantity:
@@ -724,8 +724,9 @@ class AdvancedNestingOptimizer:
                             ))
                             current_sheet.used_area += part_area
                             parts_placed += 1
-                            part_id += 1
                             placed_on_sheet = True
+                            print(f"  ✓ Размещён треугольник ▲ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
+                            part_id += 1
                     
                     # ▼ Вниз
                     if part_id <= quantity:
@@ -747,11 +748,13 @@ class AdvancedNestingOptimizer:
                             ))
                             current_sheet.used_area += part_area
                             parts_placed += 1
-                            part_id += 1
                             placed_on_sheet = True
+                            print(f"  ✓ Размещён треугольник ▼ #{part_id} на листе {current_sheet.sheet_number} в позиции ({x_base:.1f}, {y_pos:.1f})")
+                            part_id += 1
 
             if not placed_on_sheet:
                 sheets.pop()
+                print(f"  ⚠️ Лист #{current_sheet.sheet_number} удалён (не удалось разместить детали)")
                 break
 
         print(f"\n✅ Паркетная укладка завершена:")
@@ -1102,6 +1105,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                     with col_s4:
                         st.metric("Эффективность", f"{sheet.efficiency:.1f}%")
                     
+                    # ✅ ИСПРАВЛЕНИЕ: Генерация уникальных цветов для КАЖДОЙ детали
                     fig, ax = plt.subplots(figsize=(18, 10))
                     fig.patch.set_facecolor('#FFFFFF')
                     ax.set_facecolor('#F5F5F5')
@@ -1115,42 +1119,65 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
                     ax.add_patch(sheet_boundary)
                     
                     if sheet.parts:
-                        num_colors = max(20, len(sheet.parts))
-                        colors = plt.cm.tab20(np.linspace(0, 1, num_colors))
+                        # ✅ Создаём палитру цветов по количеству деталей
+                        num_parts = len(sheet.parts)
                         
+                        # Используем разные цветовые схемы для большей вариативности
+                        if num_parts <= 20:
+                            colors = plt.cm.tab20(np.linspace(0, 1, 20))
+                        elif num_parts <= 40:
+                            colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+                            colors2 = plt.cm.tab20b(np.linspace(0, 1, 20))
+                            colors = np.vstack([colors1, colors2])
+                        else:
+                            colors1 = plt.cm.tab20(np.linspace(0, 1, 20))
+                            colors2 = plt.cm.tab20b(np.linspace(0, 1, 20))
+                            colors3 = plt.cm.tab20c(np.linspace(0, 1, 20))
+                            colors = np.vstack([colors1, colors2, colors3])
+                        
+                        # ✅ Рисуем каждую деталь с уникальным цветом
                         for i, part in enumerate(sheet.parts):
-                            coords = list(part.geometry.exterior.coords)
-                            if len(coords) > 2:
-                                part_polygon = MplPolygon(
-                                    coords,
-                                    facecolor=colors[i % len(colors)],
-                                    edgecolor='#003366',
-                                    alpha=0.75,
-                                    linewidth=1.5
-                                )
-                                ax.add_patch(part_polygon)
-                                
-                                if show_labels:
-                                    centroid = part.geometry.centroid
-                                    ax.text(
-                                        centroid.x, centroid.y,
-                                        str(part.part_id),
-                                        ha='center', va='center',
-                                        fontsize=8, fontweight='bold',
-                                        color='white',
-                                        bbox=dict(
-                                            boxstyle='circle,pad=0.3',
-                                            facecolor='black',
-                                            edgecolor='white',
-                                            alpha=0.8,
-                                            linewidth=1
-                                        )
+                            try:
+                                coords = list(part.geometry.exterior.coords)
+                                if len(coords) > 2:
+                                    # Используем индекс детали для выбора цвета
+                                    color_idx = i % len(colors)
+                                    
+                                    part_polygon = MplPolygon(
+                                        coords,
+                                        facecolor=colors[color_idx],
+                                        edgecolor='#003366',
+                                        alpha=0.75,
+                                        linewidth=1.5,
+                                        zorder=2  # ✅ Детали рисуем поверх фона
                                     )
+                                    ax.add_patch(part_polygon)
+                                    
+                                    if show_labels:
+                                        centroid = part.geometry.centroid
+                                        ax.text(
+                                            centroid.x, centroid.y,
+                                            str(part.part_id),
+                                            ha='center', va='center',
+                                            fontsize=9, fontweight='bold',
+                                            color='white',
+                                            bbox=dict(
+                                                boxstyle='circle,pad=0.3',
+                                                facecolor='black',
+                                                edgecolor='white',
+                                                alpha=0.9,
+                                                linewidth=1.5
+                                            ),
+                                            zorder=3  # ✅ Номера рисуем поверх деталей
+                                        )
+                            except Exception as e:
+                                st.warning(f"⚠️ Ошибка отрисовки детали #{part.part_id}: {e}")
+                                continue
                     
                     ax.set_xlim(-50, sheet.width + 50)
                     ax.set_ylim(-50, sheet.height + 50)
                     ax.set_aspect('equal')
-                    ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5)
+                    ax.grid(True, alpha=0.3, linestyle=':', linewidth=0.5, zorder=0)
                     ax.set_title(
                         f"Лист #{sheet.sheet_number} — {len(sheet.parts)} деталей — "
                         f"Эффективность: {sheet.efficiency:.1f}%",
@@ -1182,7 +1209,7 @@ def render_nesting_optimizer_tab(objects_data: List[Any] = None):
 
 if __name__ == "__main__":
     print("="*70)
-    print("🔺 Модуль оптимизации раскроя v5.1 FINAL")
+    print("🔺 Модуль оптимизации раскроя v5.2 FINAL")
     print("   ПАРКЕТНАЯ ТЕССЕЛЯЦИЯ ТРЕУГОЛЬНИКОВ")
     print("="*70)
     print(f"Shapely доступен: {SHAPELY_AVAILABLE}")
