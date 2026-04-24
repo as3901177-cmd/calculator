@@ -370,11 +370,7 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
     """
     Создаёт паттерн для паркетной тесселяции треугольников.
     
-    ПРАВИЛЬНАЯ СТРАТЕГИЯ:
-    Паркет ▲▼ формируется поворотом треугольника на 180° относительно его базы.
-    
-    Возвращает:
-        (tri_up, tri_down, width, height)
+    НОВЫЙ ПОДХОД: Используем rotate() из Shapely для поворота треугольника.
     """
     try:
         coords = list(geom.exterior.coords)[:-1]
@@ -403,58 +399,45 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         base_end = coords[idx_base_end]
         apex = coords[idx_apex]
         
-        # Вычисляем угол базы
-        dx = base_end[0] - base_start[0]
-        dy = base_end[1] - base_start[1]
-        angle_rad = math.atan2(dy, dx)
-        angle_deg = -math.degrees(angle_rad)
+        # Создаём нормализованный треугольник ▲
+        # База горизонтально от (0,0) до (base_len, 0)
+        # Вершина сверху
         
-        # Поворачиваем так, чтобы база стала горизонтальной
-        def rotate_point(px, py, angle_degrees):
-            rad = math.radians(angle_degrees)
-            cos_a = math.cos(rad)
-            sin_a = math.sin(rad)
-            return (px * cos_a - py * sin_a, px * sin_a + py * cos_a)
+        # Вычисляем высоту от базы до вершины
+        # Используем формулу площади треугольника
+        area = abs(geom.area)
+        height = (2 * area) / base_len if base_len > MIN_COORDINATE_DIFF else 0
         
-        rotated_coords = [rotate_point(p[0], p[1], angle_deg) for p in coords]
+        # Находим X-координату вершины (проекция на базу)
+        # Используем векторное произведение для определения положения
+        base_vec = (base_end[0] - base_start[0], base_end[1] - base_start[1])
+        apex_vec = (apex[0] - base_start[0], apex[1] - base_start[1])
         
-        rotated_base_start = rotated_coords[idx_base_start]
-        rotated_base_end = rotated_coords[idx_base_end]
-        rotated_apex = rotated_coords[idx_apex]
+        # Проекция вершины на базу
+        base_len_sq = base_vec[0]**2 + base_vec[1]**2
+        if base_len_sq > 0:
+            projection = (apex_vec[0] * base_vec[0] + apex_vec[1] * base_vec[1]) / base_len_sq
+            apex_x = projection * base_len
+        else:
+            apex_x = base_len / 2
         
-        # Смещаем так, чтобы левая точка базы была в (0, 0)
-        min_x = min(rotated_base_start[0], rotated_base_end[0])
-        base_y = rotated_base_start[1]
+        # ✅ СОЗДАЁМ ДВА РАЗНЫХ ТРЕУГОЛЬНИКА
         
-        # Нормализованные координаты
-        norm_apex = (rotated_apex[0] - min_x, rotated_apex[1] - base_y)
-        
-        # Проверяем, что вершина сверху
-        if norm_apex[1] < 0:
-            norm_apex = (norm_apex[0], -norm_apex[1])
-        
-        # ✅ ПРАВИЛЬНАЯ ПАРКЕТНАЯ УКЛАДКА:
-        # ▲ треугольник: вершина вверху
+        # ▲ Треугольник вершиной ВВЕРХ
         tri_up = ShapelyPolygon([
             (0, 0),
             (base_len, 0),
-            norm_apex
+            (apex_x, height)
         ])
         
-        # ▼ треугольник: ПОВОРОТ ▲ на 180° относительно центра базы
-        # Это создаёт зеркальное отражение относительно базы
+        # ▼ Треугольник вершиной ВНИЗ (поворот на 180° относительно центра базы)
+        # Центр базы находится в точке (base_len/2, 0)
         center_x = base_len / 2
+        center_y = 0
         
-        # Поворачиваем ▲ на 180° относительно центра базы
-        tri_down = ShapelyPolygon([
-            (base_len, 0),              # Правая точка базы ▲ → левая точка базы ▼
-            (0, 0),                     # Левая точка базы ▲ → правая точка базы ▼
-            (base_len - norm_apex[0], -norm_apex[1])  # Вершина отражается
-        ])
-        
-        # Вычисляем высоту
-        area = abs(geom.area)
-        height = abs(norm_apex[1])
+        # Поворачиваем tri_up на 180° относительно центра базы
+        from shapely.affinity import rotate as shapely_rotate
+        tri_down = shapely_rotate(tri_up, 180, origin=(center_x, center_y))
         
         # Проверяем валидность
         if not tri_up.is_valid:
@@ -462,10 +445,20 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         if not tri_down.is_valid:
             tri_down = tri_down.buffer(0)
         
-        print(f"\n🔍 DEBUG паттерна:")
-        print(f"  tri_up coords: {list(tri_up.exterior.coords)}")
-        print(f"  tri_down coords: {list(tri_down.exterior.coords)}")
-        print(f"  Разница в вершинах: {abs(norm_apex[0] - (base_len - norm_apex[0])):.4f} мм")
+        # DEBUG: выводим координаты
+        coords_up = list(tri_up.exterior.coords)[:-1]
+        coords_down = list(tri_down.exterior.coords)[:-1]
+        
+        print(f"\n🔍 DEBUG паттерна v2:")
+        print(f"  Base length: {base_len:.2f}")
+        print(f"  Height: {height:.2f}")
+        print(f"  Apex X: {apex_x:.2f}")
+        print(f"  tri_up: {[(round(x,2), round(y,2)) for x,y in coords_up]}")
+        print(f"  tri_down: {[(round(x,2), round(y,2)) for x,y in coords_down]}")
+        
+        # Проверяем, что треугольники действительно разные
+        diff_y = abs(coords_up[2][1] - coords_down[2][1])
+        print(f"  Разница в Y вершин: {diff_y:.2f} (должна быть ~{2*height:.2f})")
         
         return tri_up, tri_down, base_len, height
         
@@ -474,7 +467,6 @@ def create_parquet_pattern(geom: ShapelyPolygon) -> Optional[Tuple[ShapelyPolygo
         import traceback
         traceback.print_exc()
         return None
-
 
 # ---------------------------------------------------------------------------
 # Основной класс оптимизатора
